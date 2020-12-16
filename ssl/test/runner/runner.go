@@ -46,6 +46,7 @@ import (
 	"syscall"
 	"time"
 
+	"boringssl.googlesource.com/boringssl/ssl/test/runner/hpke"
 	"boringssl.googlesource.com/boringssl/util/testresult"
 )
 
@@ -59,7 +60,8 @@ var (
 	mallocTestDebug          = flag.Bool("malloc-test-debug", false, "If true, ask bssl_shim to abort rather than fail a malloc. This can be used with a specific value for --malloc-test to identity the malloc failing that is causing problems.")
 	jsonOutput               = flag.String("json-output", "", "The file to output JSON results to.")
 	pipe                     = flag.Bool("pipe", false, "If true, print status output suitable for piping into another program.")
-	testToRun                = flag.String("test", "", "The pattern to filter tests to run, or empty to run all tests")
+	testToRun                = flag.String("test", "", "Semicolon-separated patterns of tests to run, or empty to run all tests")
+	skipTest                 = flag.String("skip", "", "Semicolon-separated patterns of tests to skip")
 	numWorkersFlag           = flag.Int("num-workers", runtime.NumCPU(), "The number of workers to run in parallel.")
 	shimPath                 = flag.String("shim-path", "../../../build/ssl/test/bssl_shim", "The location of the shim binary.")
 	handshakerPath           = flag.String("handshaker-path", "../../../build/ssl/test/handshaker", "The location of the handshaker binary.")
@@ -6376,24 +6378,6 @@ func addVersionNegotiationTests() {
 			expectedLocalError: "remote error: illegal parameter",
 		})
 
-		// The client should ignore the downgrade sentinel if
-		// configured.
-		testCases = append(testCases, testCase{
-			name: "Downgrade-" + test.name + "-Client-Ignore",
-			config: Config{
-				Bugs: ProtocolBugs{
-					NegotiateVersion: test.version,
-				},
-			},
-			expectations: connectionExpectations{
-				version: test.version,
-			},
-			flags: []string{
-				"-ignore-tls13-downgrade",
-				"-expect-tls13-downgrade",
-			},
-		})
-
 		// The server should emit the downgrade signal.
 		testCases = append(testCases, testCase{
 			testType: serverTest,
@@ -6410,31 +6394,6 @@ func addVersionNegotiationTests() {
 			expectedLocalError: test.clientShimError,
 		})
 	}
-
-	// Test that False Start is disabled when the downgrade logic triggers.
-	testCases = append(testCases, testCase{
-		name: "Downgrade-FalseStart",
-		config: Config{
-			NextProtos: []string{"foo"},
-			Bugs: ProtocolBugs{
-				NegotiateVersion:          VersionTLS12,
-				ExpectFalseStart:          true,
-				AlertBeforeFalseStartTest: alertAccessDenied,
-			},
-		},
-		expectations: connectionExpectations{
-			version: VersionTLS12,
-		},
-		flags: []string{
-			"-false-start",
-			"-advertise-alpn", "\x03foo",
-			"-ignore-tls13-downgrade",
-		},
-		shimWritesFirst:    true,
-		shouldFail:         true,
-		expectedError:      ":TLSV1_ALERT_ACCESS_DENIED:",
-		expectedLocalError: "tls: peer did not false start: EOF",
-	})
 
 	// SSL 3.0 support has been removed. Test that the shim does not
 	// support it.
@@ -16181,6 +16140,114 @@ func addDelegatedCredentialTests() {
 	})
 }
 
+func addEncryptedClientHelloTests() {
+	// Test ECH GREASE.
+
+	// Test the client's behavior when the server ignores ECH GREASE.
+	testCases = append(testCases, testCase{
+		testType: clientTest,
+		name:     "ECH-GREASE-Client-TLS13",
+		config: Config{
+			MinVersion: VersionTLS13,
+			MaxVersion: VersionTLS13,
+			Bugs: ProtocolBugs{
+				ExpectClientECH: true,
+			},
+		},
+		flags: []string{"-enable-ech-grease"},
+	})
+
+	// Test the client's ECH GREASE behavior when responding to server's
+	// HelloRetryRequest. This test implicitly checks that the first and second
+	// ClientHello messages have identical ECH extensions.
+	testCases = append(testCases, testCase{
+		testType: clientTest,
+		name:     "ECH-GREASE-Client-TLS13-HelloRetryRequest",
+		config: Config{
+			MaxVersion: VersionTLS13,
+			MinVersion: VersionTLS13,
+			// P-384 requires a HelloRetryRequest against BoringSSL's default
+			// configuration. Assert this with ExpectMissingKeyShare.
+			CurvePreferences: []CurveID{CurveP384},
+			Bugs: ProtocolBugs{
+				ExpectMissingKeyShare: true,
+				ExpectClientECH:       true,
+			},
+		},
+		flags: []string{"-enable-ech-grease", "-expect-hrr"},
+	})
+
+	retryConfigValid := ECHConfig{
+		PublicName: "example.com",
+		// A real X25519 public key obtained from hpke.GenerateKeyPair().
+		PublicKey: []byte{
+			0x23, 0x1a, 0x96, 0x53, 0x52, 0x81, 0x1d, 0x7a,
+			0x36, 0x76, 0xaa, 0x5e, 0xad, 0xdb, 0x66, 0x1c,
+			0x92, 0x45, 0x8a, 0x60, 0xc7, 0x81, 0x93, 0xb0,
+			0x47, 0x7b, 0x54, 0x18, 0x6b, 0x9a, 0x1d, 0x6d},
+		KEM: hpke.X25519WithHKDFSHA256,
+		CipherSuites: []HPKECipherSuite{
+			{
+				KDF:  hpke.HKDFSHA256,
+				AEAD: hpke.AES256GCM,
+			},
+		},
+		MaxNameLen: 42,
+	}
+
+	retryConfigUnsupportedVersion := []byte{
+		// version
+		0xba, 0xdd,
+		// length
+		0x00, 0x05,
+		// contents
+		0x05, 0x04, 0x03, 0x02, 0x01,
+	}
+
+	var validAndInvalidConfigs []byte
+	validAndInvalidConfigs = append(validAndInvalidConfigs, MarshalECHConfig(&retryConfigValid)...)
+	validAndInvalidConfigs = append(validAndInvalidConfigs, retryConfigUnsupportedVersion...)
+
+	// Test that the client accepts a well-formed encrypted_client_hello
+	// extension in response to ECH GREASE. The response includes one ECHConfig
+	// with a supported version and one with an unsupported version.
+	testCases = append(testCases, testCase{
+		testType: clientTest,
+		name:     "ECH-GREASE-Client-TLS13-Retry-Configs",
+		config: Config{
+			MinVersion: VersionTLS13,
+			MaxVersion: VersionTLS13,
+			Bugs: ProtocolBugs{
+				ExpectClientECH: true,
+				// Include an additional well-formed ECHConfig with an invalid
+				// version. This ensures the client can iterate over the retry
+				// configs.
+				SendECHRetryConfigs: validAndInvalidConfigs,
+			},
+		},
+		flags: []string{"-enable-ech-grease"},
+	})
+
+	// Test that the client aborts with a decode_error alert when it receives a
+	// syntactically-invalid encrypted_client_hello extension from the server.
+	testCases = append(testCases, testCase{
+		testType: clientTest,
+		name:     "ECH-GREASE-Client-TLS13-Invalid-Retry-Configs",
+		config: Config{
+			MinVersion: VersionTLS13,
+			MaxVersion: VersionTLS13,
+			Bugs: ProtocolBugs{
+				ExpectClientECH:     true,
+				SendECHRetryConfigs: []byte{0xba, 0xdd, 0xec, 0xcc},
+			},
+		},
+		flags:              []string{"-enable-ech-grease"},
+		shouldFail:         true,
+		expectedLocalError: "remote error: error decoding message",
+		expectedError:      ":ERROR_PARSING_EXTENSION:",
+	})
+}
+
 func worker(statusChan chan statusMsg, c chan *testCase, shimPath string, wg *sync.WaitGroup) {
 	defer wg.Done()
 
@@ -16286,6 +16353,31 @@ func statusPrinter(doneChan chan *testresult.Results, statusChan chan statusMsg,
 	doneChan <- testOutput
 }
 
+func match(oneOfPatternIfAny []string, noneOfPattern []string, candidate string) (matched bool, err error) {
+	matched = len(oneOfPatternIfAny) == 0
+
+	var didMatch bool
+	for _, pattern := range oneOfPatternIfAny {
+		didMatch, err = filepath.Match(pattern, candidate)
+		if err != nil {
+			return false, err
+		}
+
+		matched = didMatch || matched
+	}
+
+	for _, pattern := range noneOfPattern {
+		didMatch, err = filepath.Match(pattern, candidate)
+		if err != nil {
+			return false, err
+		}
+
+		matched = !didMatch && matched
+	}
+
+	return matched, nil
+}
+
 func main() {
 	flag.Parse()
 	*resourceDir = path.Clean(*resourceDir)
@@ -16333,6 +16425,7 @@ func main() {
 	addCertCompressionTests()
 	addJDK11WorkaroundTests()
 	addDelegatedCredentialTests()
+	addEncryptedClientHelloTests()
 
 	testCases = append(testCases, convertToSplitHandshakeTests(testCases)...)
 
@@ -16367,16 +16460,20 @@ func main() {
 		go worker(statusChan, testChan, *shimPath, &wg)
 	}
 
+	var oneOfPatternIfAny, noneOfPattern []string
+	if len(*testToRun) > 0 {
+		oneOfPatternIfAny = strings.Split(*testToRun, ";")
+	}
+	if len(*skipTest) > 0 {
+		noneOfPattern = strings.Split(*skipTest, ";")
+	}
+
 	var foundTest bool
 	for i := range testCases {
-		matched := true
-		if len(*testToRun) != 0 {
-			var err error
-			matched, err = filepath.Match(*testToRun, testCases[i].name)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error matching pattern: %s\n", err)
-				os.Exit(1)
-			}
+		matched, err := match(oneOfPatternIfAny, noneOfPattern, testCases[i].name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error matching pattern: %s\n", err)
+			os.Exit(1)
 		}
 
 		if !*includeDisabled {

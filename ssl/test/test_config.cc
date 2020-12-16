@@ -55,6 +55,7 @@ const Flag<bool> kBoolFlags[] = {
     {"-dtls", &TestConfig::is_dtls},
     {"-quic", &TestConfig::is_quic},
     {"-fallback-scsv", &TestConfig::fallback_scsv},
+    {"-enable-ech-grease", &TestConfig::enable_ech_grease},
     {"-require-any-client-certificate",
      &TestConfig::require_any_client_certificate},
     {"-false-start", &TestConfig::false_start},
@@ -131,8 +132,6 @@ const Flag<bool> kBoolFlags[] = {
     {"-use-custom-verify-callback", &TestConfig::use_custom_verify_callback},
     {"-allow-false-start-without-alpn",
      &TestConfig::allow_false_start_without_alpn},
-    {"-ignore-tls13-downgrade", &TestConfig::ignore_tls13_downgrade},
-    {"-expect-tls13-downgrade", &TestConfig::expect_tls13_downgrade},
     {"-handoff", &TestConfig::handoff},
     {"-use-ocsp-callback", &TestConfig::use_ocsp_callback},
     {"-set-ocsp-in-callback", &TestConfig::set_ocsp_in_callback},
@@ -1328,10 +1327,6 @@ bssl::UniquePtr<SSL_CTX> TestConfig::SetupCtx(SSL_CTX *old_ctx) const {
     SSL_CTX_set_false_start_allowed_without_alpn(ssl_ctx.get(), 1);
   }
 
-  if (ignore_tls13_downgrade) {
-    SSL_CTX_set_ignore_tls13_downgrade(ssl_ctx.get(), 1);
-  }
-
   if (use_ocsp_callback) {
     SSL_CTX_set_tlsext_status_cb(ssl_ctx.get(), LegacyOCSPCallback);
   }
@@ -1581,6 +1576,9 @@ bssl::UniquePtr<SSL> TestConfig::NewSSL(
   }
   if (!expect_channel_id.empty() || enable_channel_id) {
     SSL_set_tls_channel_id_enabled(ssl.get(), 1);
+  }
+  if (enable_ech_grease) {
+    SSL_set_enable_ech_grease(ssl.get(), 1);
   }
   if (!send_channel_id.empty()) {
     SSL_set_tls_channel_id_enabled(ssl.get(), 1);

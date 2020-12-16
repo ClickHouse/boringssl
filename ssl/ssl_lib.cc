@@ -565,7 +565,6 @@ ssl_ctx_st::ssl_ctx_st(const SSL_METHOD *ssl_method)
       grease_enabled(false),
       allow_unknown_alpn_protos(false),
       false_start_allowed_without_alpn(false),
-      ignore_tls13_downgrade(false),
       handoff(false),
       enable_early_data(false) {
   CRYPTO_MUTEX_init(&lock);
@@ -711,7 +710,6 @@ SSL *SSL_new(SSL_CTX *ctx) {
       ctx->signed_cert_timestamps_enabled;
   ssl->config->ocsp_stapling_enabled = ctx->ocsp_stapling_enabled;
   ssl->config->handoff = ctx->handoff;
-  ssl->config->ignore_tls13_downgrade = ctx->ignore_tls13_downgrade;
   ssl->quic_method = ctx->quic_method;
 
   if (!ssl->method->ssl_new(ssl.get()) ||
@@ -724,6 +722,7 @@ SSL *SSL_new(SSL_CTX *ctx) {
 
 SSL_CONFIG::SSL_CONFIG(SSL *ssl_arg)
     : ssl(ssl_arg),
+      ech_grease_enabled(false),
       signed_cert_timestamps_enabled(false),
       ocsp_stapling_enabled(false),
       channel_id_enabled(false),
@@ -731,7 +730,6 @@ SSL_CONFIG::SSL_CONFIG(SSL *ssl_arg)
       retain_only_sha256_of_client_certs(false),
       handoff(false),
       shed_handshake_config(false),
-      ignore_tls13_downgrade(false),
       jdk11_workaround(false) {
   assert(ssl);
 }
@@ -1294,6 +1292,43 @@ enum ssl_early_data_reason_t SSL_get_early_data_reason(const SSL *ssl) {
   return ssl->s3->early_data_reason;
 }
 
+const char *SSL_early_data_reason_string(enum ssl_early_data_reason_t reason) {
+  switch (reason) {
+    case ssl_early_data_unknown:
+      return "unknown";
+    case ssl_early_data_disabled:
+      return "disabled";
+    case ssl_early_data_accepted:
+      return "accepted";
+    case ssl_early_data_protocol_version:
+      return "protocol_version";
+    case ssl_early_data_peer_declined:
+      return "peer_declined";
+    case ssl_early_data_no_session_offered:
+      return "no_session_offered";
+    case ssl_early_data_session_not_resumed:
+      return "session_not_resumed";
+    case ssl_early_data_unsupported_for_session:
+      return "unsupported_for_session";
+    case ssl_early_data_hello_retry_request:
+      return "hello_retry_request";
+    case ssl_early_data_alpn_mismatch:
+      return "alpn_mismatch";
+    case ssl_early_data_channel_id:
+      return "channel_id";
+    case ssl_early_data_token_binding:
+      return "token_binding";
+    case ssl_early_data_ticket_age_skew:
+      return "ticket_age_skew";
+    case ssl_early_data_quic_parameter_mismatch:
+      return "quic_parameter_mismatch";
+    case ssl_early_data_alps_mismatch:
+      return "alps_mismatch";
+  }
+
+  return nullptr;
+}
+
 static int bio_retry_reason_to_error(int reason) {
   switch (reason) {
     case BIO_RR_CONNECT:
@@ -1430,6 +1465,13 @@ const char *SSL_error_description(int err) {
     default:
       return nullptr;
   }
+}
+
+void SSL_set_enable_ech_grease(SSL *ssl, int enable) {
+  if (!ssl->config) {
+    return;
+  }
+  ssl->config->ech_grease_enabled = !!enable;
 }
 
 uint32_t SSL_CTX_set_options(SSL_CTX *ctx, uint32_t options) {
@@ -2892,22 +2934,15 @@ void SSL_CTX_set_false_start_allowed_without_alpn(SSL_CTX *ctx, int allowed) {
   ctx->false_start_allowed_without_alpn = !!allowed;
 }
 
-int SSL_is_tls13_downgrade(const SSL *ssl) { return ssl->s3->tls13_downgrade; }
+int SSL_is_tls13_downgrade(const SSL *ssl) { return 0; }
 
 int SSL_used_hello_retry_request(const SSL *ssl) {
   return ssl->s3->used_hello_retry_request;
 }
 
-void SSL_CTX_set_ignore_tls13_downgrade(SSL_CTX *ctx, int ignore) {
-  ctx->ignore_tls13_downgrade = !!ignore;
-}
+void SSL_CTX_set_ignore_tls13_downgrade(SSL_CTX *ctx, int ignore) {}
 
-void SSL_set_ignore_tls13_downgrade(SSL *ssl, int ignore) {
-  if (!ssl->config) {
-    return;
-  }
-  ssl->config->ignore_tls13_downgrade = !!ignore;
-}
+void SSL_set_ignore_tls13_downgrade(SSL *ssl, int ignore) {}
 
 void SSL_set_shed_handshake_config(SSL *ssl, int enable) {
   if (!ssl->config) {
