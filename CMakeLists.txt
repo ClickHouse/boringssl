@@ -333,9 +333,9 @@ if(CFI)
 
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=cfi -fno-sanitize-trap=cfi -flto=thin")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=cfi -fno-sanitize-trap=cfi -flto=thin")
-  # We use Chromium's copy of clang, which requires -fuse-ld=lld if building
+  # We use Chromium's copy of clang, which requires ---ld-path=lld if building
   # with -flto. That, in turn, can't handle -ggdb.
-  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=lld")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ---ld-path=lld")
   string(REPLACE "-ggdb" "-g" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
   string(REPLACE "-ggdb" "-g" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
   # -flto causes object files to contain LLVM bitcode. Mixing those with
