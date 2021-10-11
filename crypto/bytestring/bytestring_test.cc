@@ -115,6 +115,28 @@ TEST(CBSTest, GetPrefixedBad) {
   EXPECT_FALSE(CBS_get_u24_length_prefixed(&data, &prefixed));
 }
 
+TEST(CBSTest, GetUntilFirst) {
+  static const uint8_t kData[] = {0, 1, 2, 3, 0, 1, 2, 3};
+  CBS data;
+  CBS_init(&data, kData, sizeof(kData));
+
+  CBS prefix;
+  EXPECT_FALSE(CBS_get_until_first(&data, &prefix, 4));
+  EXPECT_EQ(CBS_data(&data), kData);
+  EXPECT_EQ(CBS_len(&data), sizeof(kData));
+
+  ASSERT_TRUE(CBS_get_until_first(&data, &prefix, 0));
+  EXPECT_EQ(CBS_len(&prefix), 0u);
+  EXPECT_EQ(CBS_data(&data), kData);
+  EXPECT_EQ(CBS_len(&data), sizeof(kData));
+
+  ASSERT_TRUE(CBS_get_until_first(&data, &prefix, 2));
+  EXPECT_EQ(CBS_data(&prefix), kData);
+  EXPECT_EQ(CBS_len(&prefix), 2u);
+  EXPECT_EQ(CBS_data(&data), kData + 2);
+  EXPECT_EQ(CBS_len(&data), sizeof(kData) - 2);
+}
+
 TEST(CBSTest, GetASN1) {
   static const uint8_t kData1[] = {0x30, 2, 1, 2};
   static const uint8_t kData2[] = {0x30, 3, 1, 2};
@@ -322,11 +344,11 @@ TEST(CBBTest, InitUninitialized) {
 }
 
 TEST(CBBTest, Basic) {
-  static const uint8_t kExpected[] = {1,   2,    3,    4,    5,    6,   7,
-                                      8,   9,    0xa,  0xb,  0xc,  0xd, 0xe,
-                                      0xf, 0x10, 0x11, 0x12, 0x13, 0x14, 3, 2,
-                                      10,  9,    8,    7,    0x12, 0x11, 0x10,
-                                      0xf, 0xe,  0xd,  0xc,  0xb};
+  static const uint8_t kExpected[] = {
+      0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+      0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14,
+      0x03, 0x02, 0x0a, 0x09, 0x08, 0x07, 0x12, 0x11, 0x10, 0x0f,
+      0x0e, 0x0d, 0x0c, 0x0b, 0x00, 0x00, 0x00, 0x00};
   uint8_t *buf;
   size_t buf_len;
 
@@ -335,6 +357,7 @@ TEST(CBBTest, Basic) {
   cbb.Reset();
 
   ASSERT_TRUE(CBB_init(cbb.get(), 0));
+  ASSERT_TRUE(CBB_add_zeros(cbb.get(), 0));
   ASSERT_TRUE(CBB_add_u8(cbb.get(), 1));
   ASSERT_TRUE(CBB_add_u16(cbb.get(), 0x203));
   ASSERT_TRUE(CBB_add_u24(cbb.get(), 0x40506));
@@ -344,6 +367,7 @@ TEST(CBBTest, Basic) {
   ASSERT_TRUE(CBB_add_u16le(cbb.get(), 0x203));
   ASSERT_TRUE(CBB_add_u32le(cbb.get(), 0x708090a));
   ASSERT_TRUE(CBB_add_u64le(cbb.get(), 0xb0c0d0e0f101112));
+  ASSERT_TRUE(CBB_add_zeros(cbb.get(), 4));
   ASSERT_TRUE(CBB_finish(cbb.get(), &buf, &buf_len));
 
   bssl::UniquePtr<uint8_t> scoper(buf);
@@ -592,6 +616,10 @@ static void ExpectBerConvert(const char *name, const uint8_t *der_expected,
 TEST(CBSTest, BerConvert) {
   static const uint8_t kSimpleBER[] = {0x01, 0x01, 0x00};
 
+  // kNonMinimalLengthBER has a non-minimally encoded length.
+  static const uint8_t kNonMinimalLengthBER[] = {0x02, 0x82, 0x00, 0x01, 0x01};
+  static const uint8_t kNonMinimalLengthDER[] = {0x02, 0x01, 0x01};
+
   // kIndefBER contains a SEQUENCE with an indefinite length.
   static const uint8_t kIndefBER[] = {0x30, 0x80, 0x01, 0x01, 0x02, 0x00, 0x00};
   static const uint8_t kIndefDER[] = {0x30, 0x03, 0x01, 0x01, 0x02};
@@ -644,6 +672,9 @@ TEST(CBSTest, BerConvert) {
 
   ExpectBerConvert("kSimpleBER", kSimpleBER, sizeof(kSimpleBER), kSimpleBER,
                    sizeof(kSimpleBER));
+  ExpectBerConvert("kNonMinimalLengthBER", kNonMinimalLengthDER,
+                   sizeof(kNonMinimalLengthDER), kNonMinimalLengthBER,
+                   sizeof(kNonMinimalLengthBER));
   ExpectBerConvert("kIndefBER", kIndefDER, sizeof(kIndefDER), kIndefBER,
                    sizeof(kIndefBER));
   ExpectBerConvert("kIndefBER2", kIndefDER2, sizeof(kIndefDER2), kIndefBER2,
@@ -655,6 +686,62 @@ TEST(CBSTest, BerConvert) {
   ExpectBerConvert("kConstructedStringBER", kConstructedStringDER,
                    sizeof(kConstructedStringDER), kConstructedStringBER,
                    sizeof(kConstructedStringBER));
+}
+
+struct BERTest {
+  const char *in_hex;
+  bool ok;
+  bool ber_found;
+  unsigned tag;
+};
+
+static const BERTest kBERTests[] = {
+  // Trivial cases, also valid DER.
+  {"0000", true, false, 0},
+  {"0100", true, false, 1},
+  {"020101", true, false, 2},
+
+  // Non-minimally encoded lengths.
+  {"02810101", true, true, 2},
+  {"0282000101", true, true, 2},
+  {"028300000101", true, true, 2},
+  {"02840000000101", true, true, 2},
+  // Technically valid BER, but not handled.
+  {"02850000000101", false, false, 0},
+
+  {"0280", false, false, 0},  // Indefinite length, but not constructed.
+  {"2280", true, true, CBS_ASN1_CONSTRUCTED | 2},  // Indefinite length.
+  {"3f0000", false, false, 0},  // Invalid extended tag zero (X.690 8.1.2.4.2.c)
+  {"1f0100", false, false, 0},  // Should be a low-number tag form, even in BER.
+  {"1f4000", true, false, 0x40},
+  {"1f804000", false, false, 0},  // Non-minimal tags are invalid, even in BER.
+};
+
+TEST(CBSTest, BERElementTest) {
+  for (const auto &test : kBERTests) {
+    SCOPED_TRACE(test.in_hex);
+
+    std::vector<uint8_t> in_bytes;
+    ASSERT_TRUE(DecodeHex(&in_bytes, test.in_hex));
+    CBS in(in_bytes);
+    CBS out;
+    unsigned tag;
+    size_t header_len;
+    int ber_found;
+    int ok =
+        CBS_get_any_ber_asn1_element(&in, &out, &tag, &header_len, &ber_found);
+    ASSERT_TRUE((ok == 1) == test.ok);
+    if (!test.ok) {
+      continue;
+    }
+
+    EXPECT_TRUE((ber_found == 1) == test.ber_found);
+    EXPECT_LE(header_len, in_bytes.size());
+    EXPECT_EQ(CBS_len(&out), in_bytes.size());
+    EXPECT_EQ(CBS_len(&in), 0u);
+    EXPECT_EQ(Bytes(out), Bytes(in_bytes));
+    EXPECT_EQ(tag, test.tag);
+  }
 }
 
 struct ImplicitStringTest {
