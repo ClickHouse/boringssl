@@ -65,6 +65,7 @@
 #include <openssl/thread.h>
 
 #include "../../internal.h"
+#include "../bn/internal.h"
 
 
 #define OPENSSL_DH_MAX_MODULUS_BITS 10000
@@ -321,6 +322,27 @@ static int dh_compute_key(DH *dh, BIGNUM *out_shared_key,
   return ret;
 }
 
+int DH_compute_key_padded(unsigned char *out, const BIGNUM *peers_key, DH *dh) {
+  BN_CTX *ctx = BN_CTX_new();
+  if (ctx == NULL) {
+    return -1;
+  }
+  BN_CTX_start(ctx);
+
+  int dh_size = DH_size(dh);
+  int ret = -1;
+  BIGNUM *shared_key = BN_CTX_get(ctx);
+  if (shared_key &&
+      dh_compute_key(dh, shared_key, peers_key, ctx) &&
+      BN_bn2bin_padded(out, dh_size, shared_key)) {
+    ret = dh_size;
+  }
+
+  BN_CTX_end(ctx);
+  BN_CTX_free(ctx);
+  return ret;
+}
+
 int DH_compute_key(unsigned char *out, const BIGNUM *peers_key, DH *dh) {
   BN_CTX *ctx = BN_CTX_new();
   if (ctx == NULL) {
@@ -349,29 +371,19 @@ int DH_compute_key_hashed(DH *dh, uint8_t *out, size_t *out_len,
     return 0;
   }
 
-  BN_CTX *ctx = BN_CTX_new();
-  if (ctx == NULL) {
-    return 0;
-  }
-  BN_CTX_start(ctx);
-
   int ret = 0;
-  BIGNUM *shared_key = BN_CTX_get(ctx);
-  const size_t p_len = BN_num_bytes(dh->p);
-  uint8_t *shared_bytes = OPENSSL_malloc(p_len);
+  const size_t dh_len = DH_size(dh);
+  uint8_t *shared_bytes = OPENSSL_malloc(dh_len);
   unsigned out_len_unsigned;
-  if (!shared_key ||
-      !shared_bytes ||
-      !dh_compute_key(dh, shared_key, peers_key, ctx) ||
-      // |DH_compute_key| doesn't pad the output. SP 800-56A is ambiguous about
-      // whether the output should be padded prior to revision three. But
-      // revision three, section C.1, awkwardly specifies padding to the length
-      // of p.
+  if (!shared_bytes ||
+      // SP 800-56A is ambiguous about whether the output should be padded prior
+      // to revision three. But revision three, section C.1, awkwardly specifies
+      // padding to the length of p.
       //
       // Also, padded output avoids side-channels, so is always strongly
       // advisable.
-      !BN_bn2bin_padded(shared_bytes, p_len, shared_key) ||
-      !EVP_Digest(shared_bytes, p_len, out, &out_len_unsigned, digest, NULL) ||
+      DH_compute_key_padded(shared_bytes, peers_key, dh) != (int)dh_len ||
+      !EVP_Digest(shared_bytes, dh_len, out, &out_len_unsigned, digest, NULL) ||
       out_len_unsigned != digest_len) {
     goto err;
   }
@@ -380,8 +392,6 @@ int DH_compute_key_hashed(DH *dh, uint8_t *out, size_t *out_len,
   ret = 1;
 
  err:
-  BN_CTX_end(ctx);
-  BN_CTX_free(ctx);
   OPENSSL_free(shared_bytes);
   return ret;
 }
@@ -393,4 +403,54 @@ unsigned DH_num_bits(const DH *dh) { return BN_num_bits(dh->p); }
 int DH_up_ref(DH *dh) {
   CRYPTO_refcount_inc(&dh->references);
   return 1;
+}
+
+DH *DH_get_rfc7919_2048(void) {
+  // This is the prime from https://tools.ietf.org/html/rfc7919#appendix-A.1,
+  // which is specifically approved for FIPS in appendix D of SP 800-56Ar3.
+  static const BN_ULONG kFFDHE2048Data[] = {
+      TOBN(0xffffffff, 0xffffffff), TOBN(0x886b4238, 0x61285c97),
+      TOBN(0xc6f34a26, 0xc1b2effa), TOBN(0xc58ef183, 0x7d1683b2),
+      TOBN(0x3bb5fcbc, 0x2ec22005), TOBN(0xc3fe3b1b, 0x4c6fad73),
+      TOBN(0x8e4f1232, 0xeef28183), TOBN(0x9172fe9c, 0xe98583ff),
+      TOBN(0xc03404cd, 0x28342f61), TOBN(0x9e02fce1, 0xcdf7e2ec),
+      TOBN(0x0b07a7c8, 0xee0a6d70), TOBN(0xae56ede7, 0x6372bb19),
+      TOBN(0x1d4f42a3, 0xde394df4), TOBN(0xb96adab7, 0x60d7f468),
+      TOBN(0xd108a94b, 0xb2c8e3fb), TOBN(0xbc0ab182, 0xb324fb61),
+      TOBN(0x30acca4f, 0x483a797a), TOBN(0x1df158a1, 0x36ade735),
+      TOBN(0xe2a689da, 0xf3efe872), TOBN(0x984f0c70, 0xe0e68b77),
+      TOBN(0xb557135e, 0x7f57c935), TOBN(0x85636555, 0x3ded1af3),
+      TOBN(0x2433f51f, 0x5f066ed0), TOBN(0xd3df1ed5, 0xd5fd6561),
+      TOBN(0xf681b202, 0xaec4617a), TOBN(0x7d2fe363, 0x630c75d8),
+      TOBN(0xcc939dce, 0x249b3ef9), TOBN(0xa9e13641, 0x146433fb),
+      TOBN(0xd8b9c583, 0xce2d3695), TOBN(0xafdc5620, 0x273d3cf1),
+      TOBN(0xadf85458, 0xa2bb4a9a), TOBN(0xffffffff, 0xffffffff),
+  };
+
+  BIGNUM *const ffdhe2048_p = BN_new();
+  BIGNUM *const ffdhe2048_q = BN_new();
+  BIGNUM *const ffdhe2048_g = BN_new();
+  DH *const dh = DH_new();
+
+  if (!ffdhe2048_p || !ffdhe2048_q || !ffdhe2048_g || !dh) {
+    goto err;
+  }
+
+  bn_set_static_words(ffdhe2048_p, kFFDHE2048Data,
+                      OPENSSL_ARRAY_SIZE(kFFDHE2048Data));
+
+  if (!BN_rshift1(ffdhe2048_q, ffdhe2048_p) ||
+      !BN_set_word(ffdhe2048_g, 2) ||
+      !DH_set0_pqg(dh, ffdhe2048_p, ffdhe2048_q, ffdhe2048_g)) {
+    goto err;
+  }
+
+  return dh;
+
+ err:
+    BN_free(ffdhe2048_p);
+    BN_free(ffdhe2048_q);
+    BN_free(ffdhe2048_g);
+    DH_free(dh);
+    return NULL;
 }
