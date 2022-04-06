@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"crypto"
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rsa"
 	"crypto/subtle"
@@ -19,6 +18,8 @@ import (
 	"math/big"
 	"net"
 	"time"
+
+	"boringssl.googlesource.com/boringssl/ssl/test/runner/ed25519"
 )
 
 type clientHandshakeState struct {
@@ -100,19 +101,6 @@ func (c *Conn) clientHandshake() error {
 		return errors.New("tls: NextProtos values too large")
 	}
 
-	// Translate the bugs that modify ClientHello extension order into a
-	// list of prefix extensions. The marshal function will try these
-	// extensions before any others, followed by any remaining extensions in
-	// the default order.
-	var prefixExtensions []uint16
-	if c.config.Bugs.PSKBinderFirst && !c.config.Bugs.OnlyCorruptSecondPSKBinder {
-		prefixExtensions = append(prefixExtensions, extensionPreSharedKey)
-	}
-	if c.config.Bugs.SwapNPNAndALPN {
-		prefixExtensions = append(prefixExtensions, extensionALPN)
-		prefixExtensions = append(prefixExtensions, extensionNextProtoNeg)
-	}
-
 	minVersion := c.config.minVersion(c.isDTLS)
 	maxVersion := c.config.maxVersion(c.isDTLS)
 	hello := &clientHelloMsg{
@@ -132,14 +120,16 @@ func (c *Conn) clientHandshake() error {
 		channelIDSupported:      c.config.ChannelID != nil,
 		tokenBindingParams:      c.config.TokenBindingParams,
 		tokenBindingVersion:     c.config.TokenBindingVersion,
+		npnAfterAlpn:            c.config.Bugs.SwapNPNAndALPN,
 		extendedMasterSecret:    maxVersion >= VersionTLS10,
 		srtpProtectionProfiles:  c.config.SRTPProtectionProfiles,
 		srtpMasterKeyIdentifier: c.config.Bugs.SRTPMasterKeyIdentifer,
 		customExtension:         c.config.Bugs.CustomExtension,
+		pskBinderFirst:          c.config.Bugs.PSKBinderFirst,
 		omitExtensions:          c.config.Bugs.OmitExtensions,
 		emptyExtensions:         c.config.Bugs.EmptyExtensions,
 		delegatedCredentials:    !c.config.Bugs.DisableDelegatedCredentials,
-		prefixExtensions:        prefixExtensions,
+		pqExperimentSignal:      c.config.PQExperimentSignal,
 	}
 
 	if maxVersion >= VersionTLS13 {
@@ -205,10 +195,6 @@ func (c *Conn) clientHandshake() error {
 
 	if c.noRenegotiationInfo() {
 		hello.secureRenegotiation = nil
-	}
-
-	for protocol, _ := range c.config.ApplicationSettings {
-		hello.alpsProtocols = append(hello.alpsProtocols, protocol)
 	}
 
 	var keyShares map[CurveID]ecdhCurve
@@ -405,9 +391,6 @@ NextCipherSuite:
 			return errors.New("tls: short read from Rand: " + err.Error())
 		}
 	}
-	if c.config.Bugs.MockQUICTransport != nil && !c.config.Bugs.CompatModeWithQUIC {
-		hello.sessionId = []byte{}
-	}
 
 	if c.config.Bugs.SendCipherSuites != nil {
 		hello.cipherSuites = c.config.Bugs.SendCipherSuites
@@ -460,18 +443,15 @@ NextCipherSuite:
 			helloBytes = hello.marshal()
 		}
 
-		var appendToHello byte
 		if c.config.Bugs.PartialClientFinishedWithClientHello {
-			appendToHello = typeFinished
-		} else if c.config.Bugs.PartialEndOfEarlyDataWithClientHello {
-			appendToHello = typeEndOfEarlyData
-		} else if c.config.Bugs.PartialSecondClientHelloAfterFirst {
-			appendToHello = typeClientHello
-		} else if c.config.Bugs.PartialClientKeyExchangeWithClientHello {
-			appendToHello = typeClientKeyExchange
-		}
-		if appendToHello != 0 {
-			c.writeRecord(recordTypeHandshake, append(helloBytes[:len(helloBytes):len(helloBytes)], appendToHello))
+			// Include one byte of Finished. We can compute it
+			// without completing the handshake. This assumes we
+			// negotiate TLS 1.3 with no HelloRetryRequest or
+			// CertificateRequest.
+			toWrite := make([]byte, 0, len(helloBytes)+1)
+			toWrite = append(toWrite, helloBytes...)
+			toWrite = append(toWrite, typeFinished)
+			c.writeRecord(recordTypeHandshake, toWrite)
 		} else {
 			c.writeRecord(recordTypeHandshake, helloBytes)
 		}
@@ -623,39 +603,20 @@ NextCipherSuite:
 		}
 
 		hello.hasEarlyData = c.config.Bugs.SendEarlyDataOnSecondClientHello
-		// The first ClientHello may have skipped this due to OnlyCorruptSecondPSKBinder.
-		if c.config.Bugs.PSKBinderFirst && c.config.Bugs.OnlyCorruptSecondPSKBinder {
-			hello.prefixExtensions = append(hello.prefixExtensions, extensionPreSharedKey)
-		}
-		if c.config.Bugs.OmitPSKsOnSecondClientHello {
-			hello.pskIdentities = nil
-			hello.pskBinders = nil
-		}
 		hello.raw = nil
 
 		if len(hello.pskIdentities) > 0 {
 			generatePSKBinders(c.wireVersion, hello, pskCipherSuite, session.masterSecret, helloBytes, helloRetryRequest.marshal(), c.config)
 		}
 		secondHelloBytes = hello.marshal()
-		secondHelloBytesToWrite := secondHelloBytes
-
-		if c.config.Bugs.PartialSecondClientHelloAfterFirst {
-			// The first byte has already been sent.
-			secondHelloBytesToWrite = secondHelloBytesToWrite[1:]
-		}
 
 		if c.config.Bugs.InterleaveEarlyData {
 			c.sendFakeEarlyData(4)
-			c.writeRecord(recordTypeHandshake, secondHelloBytesToWrite[:16])
+			c.writeRecord(recordTypeHandshake, secondHelloBytes[:16])
 			c.sendFakeEarlyData(4)
-			c.writeRecord(recordTypeHandshake, secondHelloBytesToWrite[16:])
-		} else if c.config.Bugs.PartialClientFinishedWithSecondClientHello {
-			toWrite := make([]byte, len(secondHelloBytesToWrite)+1)
-			copy(toWrite, secondHelloBytesToWrite)
-			toWrite[len(secondHelloBytesToWrite)] = typeFinished
-			c.writeRecord(recordTypeHandshake, toWrite)
+			c.writeRecord(recordTypeHandshake, secondHelloBytes[16:])
 		} else {
-			c.writeRecord(recordTypeHandshake, secondHelloBytesToWrite)
+			c.writeRecord(recordTypeHandshake, secondHelloBytes)
 		}
 		c.flushHandshake()
 
@@ -940,6 +901,10 @@ func (hs *clientHandshakeState) doTLS13Handshake() error {
 				return errors.New("tls: expected no certificate_authorities extension")
 			}
 
+			if err := checkRSAPSSSupport(c.config.Bugs.ExpectRSAPSSSupport, certReq.signatureAlgorithms, certReq.signatureAlgorithmsCert); err != nil {
+				return err
+			}
+
 			if c.config.Bugs.IgnorePeerSignatureAlgorithmPreferences {
 				certReq.signatureAlgorithms = c.config.signSignatureAlgorithms()
 			}
@@ -1112,12 +1077,7 @@ func (hs *clientHandshakeState) doTLS13Handshake() error {
 		}
 		endOfEarlyData := new(endOfEarlyDataMsg)
 		endOfEarlyData.nonEmpty = c.config.Bugs.NonEmptyEndOfEarlyData
-		if c.config.Bugs.PartialEndOfEarlyDataWithClientHello {
-			// The first byte has already been sent.
-			c.writeRecord(recordTypeHandshake, endOfEarlyData.marshal()[1:])
-		} else {
-			c.writeRecord(recordTypeHandshake, endOfEarlyData.marshal())
-		}
+		c.writeRecord(recordTypeHandshake, endOfEarlyData.marshal())
 		hs.writeClientHash(endOfEarlyData.marshal())
 	}
 
@@ -1130,26 +1090,6 @@ func (hs *clientHandshakeState) doTLS13Handshake() error {
 	}
 
 	c.useOutTrafficSecret(c.wireVersion, hs.suite, clientHandshakeTrafficSecret)
-
-	// The client EncryptedExtensions message is sent if some extension uses it.
-	// (Currently only ALPS does.)
-	hasEncryptedExtensions := c.config.Bugs.AlwaysSendClientEncryptedExtensions
-	clientEncryptedExtensions := new(clientEncryptedExtensionsMsg)
-	if encryptedExtensions.extensions.hasApplicationSettings || (c.config.Bugs.SendApplicationSettingsWithEarlyData && c.hasApplicationSettings) {
-		hasEncryptedExtensions = true
-		if !c.config.Bugs.OmitClientApplicationSettings {
-			clientEncryptedExtensions.hasApplicationSettings = true
-			clientEncryptedExtensions.applicationSettings = c.localApplicationSettings
-		}
-	}
-	if c.config.Bugs.SendExtraClientEncryptedExtension {
-		hasEncryptedExtensions = true
-		clientEncryptedExtensions.customExtension = []byte{0}
-	}
-	if hasEncryptedExtensions && !c.config.Bugs.OmitClientEncryptedExtensions {
-		hs.writeClientHash(clientEncryptedExtensions.marshal())
-		c.writeRecord(recordTypeHandshake, clientEncryptedExtensions.marshal())
-	}
 
 	if certReq != nil && !c.config.Bugs.SkipClientCertificate {
 		certMsg := &certificateMsg{
@@ -1318,6 +1258,9 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 	certReq, ok := msg.(*certificateRequestMsg)
 	if ok {
 		certRequested = true
+		if err := checkRSAPSSSupport(c.config.Bugs.ExpectRSAPSSSupport, certReq.signatureAlgorithms, certReq.signatureAlgorithmsCert); err != nil {
+			return err
+		}
 		if c.config.Bugs.IgnorePeerSignatureAlgorithmPreferences {
 			certReq.signatureAlgorithms = c.config.signSignatureAlgorithms()
 		}
@@ -1372,12 +1315,7 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 		if c.config.Bugs.EarlyChangeCipherSpec < 2 {
 			hs.writeClientHash(ckx.marshal())
 		}
-		if c.config.Bugs.PartialClientKeyExchangeWithClientHello {
-			// The first byte was already written.
-			c.writeRecord(recordTypeHandshake, ckx.marshal()[1:])
-		} else {
-			c.writeRecord(recordTypeHandshake, ckx.marshal())
-		}
+		c.writeRecord(recordTypeHandshake, ckx.marshal())
 	}
 
 	if hs.serverHello.extensions.extendedMasterSecret && c.vers >= VersionTLS10 {
@@ -1516,7 +1454,7 @@ func (hs *clientHandshakeState) verifyCertificates(certMsg *certificateMsg) erro
 		}
 	}
 
-	leafPublicKey := certs[0].PublicKey
+	leafPublicKey := getCertificatePublicKey(certs[0])
 	switch leafPublicKey.(type) {
 	case *rsa.PublicKey, *ecdsa.PublicKey, ed25519.PublicKey:
 		break
@@ -1719,8 +1657,6 @@ func (hs *clientHandshakeState) processServerExtensions(serverExtensions *server
 			c.sendAlert(alertHandshakeFailure)
 			return errors.New("tls: server accepted early data when not expected")
 		}
-	} else if serverExtensions.hasEarlyData {
-		return errors.New("tls: server accepted early data when not resuming")
 	}
 
 	if len(serverExtensions.quicTransportParams) > 0 {
@@ -1731,28 +1667,8 @@ func (hs *clientHandshakeState) processServerExtensions(serverExtensions *server
 		c.quicTransportParams = serverExtensions.quicTransportParams
 	}
 
-	if serverExtensions.hasApplicationSettings {
-		if c.vers < VersionTLS13 {
-			return errors.New("tls: server sent application settings at invalid version")
-		}
-		if serverExtensions.hasEarlyData {
-			return errors.New("tls: server sent application settings with 0-RTT")
-		}
-		if !serverHasALPN {
-			return errors.New("tls: server sent application settings without ALPN")
-		}
-		settings, ok := c.config.ApplicationSettings[serverExtensions.alpnProtocol]
-		if !ok {
-			return errors.New("tls: server sent application settings for invalid protocol")
-		}
-		c.hasApplicationSettings = true
-		c.localApplicationSettings = settings
-		c.peerApplicationSettings = serverExtensions.applicationSettings
-	} else if serverExtensions.hasEarlyData {
-		// 0-RTT connections inherit application settings from the session.
-		c.hasApplicationSettings = hs.session.hasApplicationSettings
-		c.localApplicationSettings = hs.session.localApplicationSettings
-		c.peerApplicationSettings = hs.session.peerApplicationSettings
+	if c.config.Bugs.ExpectPQExperimentSignal != serverExtensions.pqExperimentSignal {
+		return fmt.Errorf("tls: PQ experiment signal presence (%t) was not what was expected", serverExtensions.pqExperimentSignal)
 	}
 
 	return nil
@@ -1934,12 +1850,7 @@ func (hs *clientHandshakeState) sendFinished(out []byte, isResume bool) error {
 	c.clientVerify = append(c.clientVerify[:0], finished.verifyData...)
 	hs.finishedBytes = finished.marshal()
 	hs.writeHash(hs.finishedBytes, seqno)
-	if c.config.Bugs.PartialClientFinishedWithClientHello {
-		// The first byte has already been written.
-		postCCSMsgs = append(postCCSMsgs, hs.finishedBytes[1:])
-	} else {
-		postCCSMsgs = append(postCCSMsgs, hs.finishedBytes)
-	}
+	postCCSMsgs = append(postCCSMsgs, hs.finishedBytes)
 
 	if c.config.Bugs.FragmentAcrossChangeCipherSpec {
 		c.writeRecord(recordTypeHandshake, postCCSMsgs[0][:5])
@@ -2086,24 +1997,18 @@ func writeIntPadded(b []byte, x *big.Int) {
 }
 
 func generatePSKBinders(version uint16, hello *clientHelloMsg, pskCipherSuite *cipherSuite, psk, firstClientHello, helloRetryRequest []byte, config *Config) {
-	maybeCorruptBinder := !config.Bugs.OnlyCorruptSecondPSKBinder || len(firstClientHello) > 0
+	if config.Bugs.SendNoPSKBinder {
+		return
+	}
+
 	binderLen := pskCipherSuite.hash().Size()
+	if config.Bugs.SendShortPSKBinder {
+		binderLen--
+	}
+
 	numBinders := 1
-	if maybeCorruptBinder {
-		if config.Bugs.SendNoPSKBinder {
-			// The binders may have been set from the previous
-			// ClientHello.
-			hello.pskBinders = nil
-			return
-		}
-
-		if config.Bugs.SendShortPSKBinder {
-			binderLen--
-		}
-
-		if config.Bugs.SendExtraPSKBinder {
-			numBinders++
-		}
+	if config.Bugs.SendExtraPSKBinder {
+		numBinders++
 	}
 
 	// Fill hello.pskBinders with appropriate length arrays of zeros so the
@@ -2118,13 +2023,11 @@ func generatePSKBinders(version uint16, hello *clientHelloMsg, pskCipherSuite *c
 	binderSize := len(hello.pskBinders)*(binderLen+1) + 2
 	truncatedHello := helloBytes[:len(helloBytes)-binderSize]
 	binder := computePSKBinder(psk, version, resumptionPSKBinderLabel, pskCipherSuite, firstClientHello, helloRetryRequest, truncatedHello)
-	if maybeCorruptBinder {
-		if config.Bugs.SendShortPSKBinder {
-			binder = binder[:binderLen]
-		}
-		if config.Bugs.SendInvalidPSKBinder {
-			binder[0] ^= 1
-		}
+	if config.Bugs.SendShortPSKBinder {
+		binder = binder[:binderLen]
+	}
+	if config.Bugs.SendInvalidPSKBinder {
+		binder[0] ^= 1
 	}
 
 	for i := range hello.pskBinders {

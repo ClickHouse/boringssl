@@ -59,6 +59,7 @@
 
 #include <openssl/base.h>
 
+#include <openssl/ex_data.h>
 #include <openssl/thread.h>
 
 #if defined(__cplusplus)
@@ -68,10 +69,6 @@ extern "C" {
 
 // DH contains functions for performing Diffie-Hellman key agreement in
 // multiplicative groups.
-//
-// This module is deprecated and retained for legacy reasons only. It is not
-// considered a priority for performance or hardening work. Do not use it in
-// new code. Use X25519 or ECDH with P-256 instead.
 
 
 // Allocation and destruction.
@@ -88,21 +85,6 @@ OPENSSL_EXPORT int DH_up_ref(DH *dh);
 
 
 // Properties.
-
-// DH_get0_pub_key returns |dh|'s public key.
-OPENSSL_EXPORT const BIGNUM *DH_get0_pub_key(const DH *dh);
-
-// DH_get0_priv_key returns |dh|'s private key, or NULL if |dh| is a public key.
-OPENSSL_EXPORT const BIGNUM *DH_get0_priv_key(const DH *dh);
-
-// DH_get0_p returns |dh|'s group modulus.
-OPENSSL_EXPORT const BIGNUM *DH_get0_p(const DH *dh);
-
-// DH_get0_q returns the size of |dh|'s subgroup, or NULL if it is unset.
-OPENSSL_EXPORT const BIGNUM *DH_get0_q(const DH *dh);
-
-// DH_get0_g returns |dh|'s group generator.
-OPENSSL_EXPORT const BIGNUM *DH_get0_g(const DH *dh);
 
 // DH_get0_key sets |*out_pub_key| and |*out_priv_key|, if non-NULL, to |dh|'s
 // public and private key, respectively. If |dh| is a public key, the private
@@ -125,11 +107,6 @@ OPENSSL_EXPORT void DH_get0_pqg(const DH *dh, const BIGNUM **out_p,
 // argument and returns one. Otherwise, it returns zero. |q| may be NULL, but
 // |p| and |g| must either be specified or already configured on |dh|.
 OPENSSL_EXPORT int DH_set0_pqg(DH *dh, BIGNUM *p, BIGNUM *q, BIGNUM *g);
-
-// DH_set_length sets the number of bits to use for the secret exponent when
-// calling |DH_generate_key| on |dh| and returns one. If unset,
-// |DH_generate_key| will use the bit length of p.
-OPENSSL_EXPORT int DH_set_length(DH *dh, unsigned priv_length);
 
 
 // Standard parameters.
@@ -167,29 +144,8 @@ OPENSSL_EXPORT int DH_generate_key(DH *dh);
 // writes it as a big-endian integer into |out|, which must have |DH_size|
 // bytes of space. It returns the number of bytes written, or a negative number
 // on error.
-//
-// Note the output may be shorter than |DH_size| bytes. Contrary to PKCS #3,
-// this function returns a variable-length shared key with leading zeros
-// removed. This may result in sporadic key mismatch and, if |dh| is reused,
-// side channel attacks such as https://raccoon-attack.com/.
-//
-// This is a legacy algorithm, so we do not provide a fixed-width variant. Use
-// X25519 or ECDH with P-256 instead.
 OPENSSL_EXPORT int DH_compute_key(uint8_t *out, const BIGNUM *peers_key,
                                   DH *dh);
-
-// DH_compute_key_hashed calculates the shared key between |dh| and |peers_key|
-// and hashes it with the given |digest|. If the hash output is less than
-// |max_out_len| bytes then it writes the hash output to |out| and sets
-// |*out_len| to the number of bytes written. Otherwise it signals an error. It
-// returns one on success or zero on error.
-//
-// NOTE: this follows the usual BoringSSL return-value convention, but that's
-// different from |DH_compute_key|, above.
-OPENSSL_EXPORT int DH_compute_key_hashed(DH *dh, uint8_t *out, size_t *out_len,
-                                         size_t max_out_len,
-                                         const BIGNUM *peers_key,
-                                         const EVP_MD *digest);
 
 
 // Utility functions.
@@ -249,6 +205,18 @@ OPENSSL_EXPORT DH *DH_parse_parameters(CBS *cbs);
 OPENSSL_EXPORT int DH_marshal_parameters(CBB *cbb, const DH *dh);
 
 
+// ex_data functions.
+//
+// See |ex_data.h| for details.
+
+OPENSSL_EXPORT int DH_get_ex_new_index(long argl, void *argp,
+                                       CRYPTO_EX_unused *unused,
+                                       CRYPTO_EX_dup *dup_unused,
+                                       CRYPTO_EX_free *free_func);
+OPENSSL_EXPORT int DH_set_ex_data(DH *d, int idx, void *arg);
+OPENSSL_EXPORT void *DH_get_ex_data(DH *d, int idx);
+
+
 // Deprecated functions.
 
 // DH_generate_parameters behaves like |DH_generate_parameters_ex|, which is
@@ -301,6 +269,7 @@ struct dh_st {
 
   int flags;
   CRYPTO_refcount_t references;
+  CRYPTO_EX_DATA ex_data;
 };
 
 

@@ -179,7 +179,6 @@ extern "C" {
 #define TLS1_AD_BAD_CERTIFICATE_HASH_VALUE 114
 #define TLS1_AD_UNKNOWN_PSK_IDENTITY 115
 #define TLS1_AD_CERTIFICATE_REQUIRED 116
-#define TLS1_AD_NO_APPLICATION_PROTOCOL 120
 
 // ExtensionType values from RFC6066
 #define TLSEXT_TYPE_server_name 0
@@ -211,7 +210,8 @@ extern "C" {
 // shouldn't be a problem in practice.
 #define TLSEXT_TYPE_quic_transport_parameters 0xffa5
 
-// ExtensionType value from RFC8879
+// ExtensionType value assigned to
+// https://tools.ietf.org/html/draft-ietf-tls-certificate-compression-03
 #define TLSEXT_TYPE_cert_compression 27
 
 // ExtensionType value from RFC4507
@@ -231,16 +231,9 @@ extern "C" {
 // ExtensionType value from RFC5746
 #define TLSEXT_TYPE_renegotiate 0xff01
 
-// ExtensionType value from draft-ietf-tls-subcerts.
-#define TLSEXT_TYPE_delegated_credential 0x22
-
-// ExtensionType value from draft-vvv-tls-alps. This is not an IANA defined
+// ExtensionType value from draft-ietf-tls-subcerts. This is not an IANA defined
 // extension number.
-#define TLSEXT_TYPE_application_settings 17513
-
-// ExtensionType value from draft-ietf-tls-esni-08. This is not an IANA defined
-// extension number.
-#define TLSEXT_TYPE_encrypted_client_hello 0xfe08
+#define TLSEXT_TYPE_delegated_credential 0xff02
 
 // ExtensionType value from RFC6962
 #define TLSEXT_TYPE_certificate_timestamp 18
@@ -250,6 +243,9 @@ extern "C" {
 
 // This is not an IANA defined extension number
 #define TLSEXT_TYPE_channel_id 30032
+
+// This is not an IANA defined extension number
+#define TLSEXT_TYPE_pq_experiment_signal 54538
 
 // status request value from RFC 3546
 #define TLSEXT_STATUSTYPE_nothing (-1)
@@ -274,7 +270,7 @@ extern "C" {
 #define TLSEXT_hash_sha384 5
 #define TLSEXT_hash_sha512 6
 
-// From https://www.rfc-editor.org/rfc/rfc8879.html#section-3
+// From https://tools.ietf.org/html/draft-ietf-tls-certificate-compression-03#section-3
 #define TLSEXT_cert_compression_zlib 1
 #define TLSEXT_cert_compression_brotli 2
 

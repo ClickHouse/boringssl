@@ -16,9 +16,7 @@
 // pointer, on grounds that MSVC cannot check them. Unfortunately, there is no
 // way to suppress the warning just on one line. The warning is flagged inside
 // the STL itself, so suppressing at the |std::copy| call does not work.
-#if !defined(_SCL_SECURE_NO_WARNINGS)
 #define _SCL_SECURE_NO_WARNINGS
-#endif
 
 #include <openssl/base.h>
 
@@ -55,6 +53,7 @@ OPENSSL_MSVC_PRAGMA(warning(push, 3))
 #include <ws2tcpip.h>
 OPENSSL_MSVC_PRAGMA(warning(pop))
 
+typedef int ssize_t;
 OPENSSL_MSVC_PRAGMA(comment(lib, "Ws2_32.lib"))
 #endif
 
@@ -67,10 +66,7 @@ OPENSSL_MSVC_PRAGMA(comment(lib, "Ws2_32.lib"))
 #include "transport_common.h"
 
 
-#if defined(OPENSSL_WINDOWS)
-using socket_result_t = int;
-#else
-using socket_result_t = ssize_t;
+#if !defined(OPENSSL_WINDOWS)
 static int closesocket(int sock) {
   return close(sock);
 }
@@ -665,8 +661,7 @@ void PrintSSLError(FILE *file, const char *msg, int ssl_err, int ret) {
       fprintf(file, "%s: received close_notify\n", msg);
       break;
     default:
-      fprintf(file, "%s: unexpected error: %s\n", msg,
-              SSL_error_description(ssl_err));
+      fprintf(file, "%s: unknown error type (%d)\n", msg, ssl_err);
   }
   ERR_print_errors_fp(file);
 }
@@ -741,13 +736,12 @@ bool TransferData(SSL *ssl, int sock) {
           return true;
         }
 
-        size_t n;
-        if (!WriteToFD(1, &n, buffer, ssl_ret)) {
-          fprintf(stderr, "Error writing to stdout.\n");
-          return false;
-        }
+        ssize_t n;
+        do {
+          n = BORINGSSL_WRITE(1, buffer, ssl_ret);
+        } while (n == -1 && errno == EINTR);
 
-        if (n != static_cast<size_t>(ssl_ret)) {
+        if (n != ssl_ret) {
           fprintf(stderr, "Short write to stderr.\n");
           return false;
         }
@@ -789,7 +783,7 @@ class SocketLineReader {
         return false;
       }
 
-      socket_result_t n;
+      ssize_t n;
       do {
         n = recv(sock_, &buf_[buf_len_], sizeof(buf_) - buf_len_, 0);
       } while (n == -1 && errno == EINTR);
@@ -874,7 +868,7 @@ static bool SendAll(int sock, const char *data, size_t data_len) {
   size_t done = 0;
 
   while (done < data_len) {
-    socket_result_t n;
+    ssize_t n;
     do {
       n = send(sock, &data[done], data_len - done, 0);
     } while (n == -1 && errno == EINTR);

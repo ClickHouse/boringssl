@@ -133,9 +133,9 @@ bool tls13_process_certificate(SSL_HANDSHAKE *hs, const SSLMessage &msg,
     }
 
     ssl_cert_decompression_func_t decompress = nullptr;
-    for (const auto &alg : ssl->ctx->cert_compression_algs) {
-      if (alg.alg_id == alg_id) {
-        decompress = alg.decompress;
+    for (const auto* alg : ssl->ctx->cert_compression_algs.get()) {
+      if (alg->alg_id == alg_id) {
+        decompress = alg->decompress;
         break;
       }
     }
@@ -244,7 +244,8 @@ bool tls13_process_certificate(SSL_HANDSHAKE *hs, const SSLMessage &msg,
 
     uint8_t alert = SSL_AD_DECODE_ERROR;
     if (!ssl_parse_extensions(&extensions, &alert, ext_types,
-                              /*ignore_unknown=*/false)) {
+                              OPENSSL_ARRAY_SIZE(ext_types),
+                              0 /* reject unknown */)) {
       ssl_send_alert(ssl, SSL3_AL_FATAL, alert);
       return false;
     }
@@ -355,7 +356,7 @@ bool tls13_process_certificate_verify(SSL_HANDSHAKE *hs, const SSLMessage &msg) 
   }
 
   uint8_t alert = SSL_AD_DECODE_ERROR;
-  if (!tls12_check_peer_sigalg(hs, &alert, signature_algorithm)) {
+  if (!tls12_check_peer_sigalg(ssl, &alert, signature_algorithm)) {
     ssl_send_alert(ssl, SSL3_AL_FATAL, alert);
     return false;
   }
@@ -383,20 +384,21 @@ bool tls13_process_finished(SSL_HANDSHAKE *hs, const SSLMessage &msg,
                             bool use_saved_value) {
   SSL *const ssl = hs->ssl;
   uint8_t verify_data_buf[EVP_MAX_MD_SIZE];
-  Span<const uint8_t> verify_data;
+  const uint8_t *verify_data;
+  size_t verify_data_len;
   if (use_saved_value) {
     assert(ssl->server);
-    verify_data = hs->expected_client_finished();
+    verify_data = hs->expected_client_finished;
+    verify_data_len = hs->hash_len;
   } else {
-    size_t len;
-    if (!tls13_finished_mac(hs, verify_data_buf, &len, !ssl->server)) {
+    if (!tls13_finished_mac(hs, verify_data_buf, &verify_data_len,
+                            !ssl->server)) {
       return false;
     }
-    verify_data = MakeConstSpan(verify_data_buf, len);
+    verify_data = verify_data_buf;
   }
 
-  bool finished_ok =
-      CBS_mem_equal(&msg.body, verify_data.data(), verify_data.size());
+  bool finished_ok = CBS_mem_equal(&msg.body, verify_data, verify_data_len);
 #if defined(BORINGSSL_UNSAFE_FUZZER_MODE)
   finished_ok = true;
 #endif
@@ -516,9 +518,9 @@ bool tls13_add_certificate(SSL_HANDSHAKE *hs) {
   }
 
   const CertCompressionAlg *alg = nullptr;
-  for (const auto &candidate : ssl->ctx->cert_compression_algs) {
-    if (candidate.alg_id == hs->cert_compression_alg_id) {
-      alg = &candidate;
+  for (const auto *candidate : ssl->ctx->cert_compression_algs.get()) {
+    if (candidate->alg_id == hs->cert_compression_alg_id) {
+      alg = candidate;
       break;
     }
   }

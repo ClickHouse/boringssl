@@ -16,7 +16,6 @@ endmacro()
 
 fuzzer(arm_cpuinfo)
 fuzzer(bn_mod_exp)
-fuzzer(bn_div)
 fuzzer(privkey)
 fuzzer(cert)
 fuzzer(spki)
