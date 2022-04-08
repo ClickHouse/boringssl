@@ -2,7 +2,7 @@ include_directories(../include)
 
 if(NOT OPENSSL_NO_ASM)
   if(UNIX)
-    if(ARCH STREQUAL "aarch64")
+    if(${ARCH} STREQUAL "aarch64")
       # The "armx" Perl scripts look for "64" in the style argument
       # in order to decide whether to generate 32- or 64-bit asm.
       if(APPLE)
@@ -10,16 +10,16 @@ if(NOT OPENSSL_NO_ASM)
       else()
         set(PERLASM_STYLE linux64)
       endif()
-    elseif(ARCH STREQUAL "arm")
+    elseif(${ARCH} STREQUAL "arm")
       if(APPLE)
         set(PERLASM_STYLE ios32)
       else()
         set(PERLASM_STYLE linux32)
       endif()
-    elseif(ARCH STREQUAL "ppc64le")
+    elseif(${ARCH} STREQUAL "ppc64le")
       set(PERLASM_STYLE linux64le)
     else()
-      if(ARCH STREQUAL "x86")
+      if(${ARCH} STREQUAL "x86")
         set(PERLASM_FLAGS "-fPIC -DOPENSSL_IA32_SSE2")
       endif()
       if(APPLE)
@@ -47,29 +47,23 @@ if(NOT OPENSSL_NO_ASM)
       endforeach()
     endif()
   else()
-    if(ARCH STREQUAL "aarch64")
-      set(PERLASM_STYLE win64)
-      set(ASM_EXT S)
-      enable_language(ASM)
+    if(${ARCH} STREQUAL "x86_64")
+      set(PERLASM_STYLE nasm)
     else()
-      if(ARCH STREQUAL "x86_64")
-        set(PERLASM_STYLE nasm)
-      else()
-        set(PERLASM_STYLE win32n)
-        set(PERLASM_FLAGS "-DOPENSSL_IA32_SSE2")
-      endif()
-      set(CMAKE_ASM_NASM_FLAGS "${CMAKE_ASM_NASM_FLAGS} -gcv8")
-
-      # On Windows, we use the NASM output.
-      set(ASM_EXT asm)
-      enable_language(ASM_NASM)
+      set(PERLASM_STYLE win32n)
+      set(PERLASM_FLAGS "-DOPENSSL_IA32_SSE2")
     endif()
+    set(CMAKE_ASM_NASM_FLAGS "${CMAKE_ASM_NASM_FLAGS} -gcv8")
+
+    # On Windows, we use the NASM output, specifically built with Yasm.
+    set(ASM_EXT asm)
+    enable_language(ASM_NASM)
   endif()
 endif()
 
 function(perlasm dest src)
   get_filename_component(dir ${dest} DIRECTORY)
-  if(dir STREQUAL "")
+  if ("${dir}" STREQUAL "")
     set(dir ".")
   endif()
 
@@ -104,7 +98,7 @@ if(FIPS_DELOCATE OR FIPS_SHARED)
   )
 endif()
 
-if(ARCH STREQUAL "arm")
+if(${ARCH} STREQUAL "arm")
   set(
     CRYPTO_ARCH_SOURCES
 
@@ -115,24 +109,17 @@ if(ARCH STREQUAL "arm")
   )
 endif()
 
-if(ARCH STREQUAL "aarch64")
+if(${ARCH} STREQUAL "aarch64")
   set(
     CRYPTO_ARCH_SOURCES
 
     chacha/chacha-armv8.${ASM_EXT}
     test/trampoline-armv8.${ASM_EXT}
+    third_party/sike/asm/fp-armv8.${ASM_EXT}
   )
 endif()
 
-if(ARCH STREQUAL "ppc64le")
-  set(
-    CRYPTO_ARCH_SOURCES
-
-    test/trampoline-ppc.${ASM_EXT}
-  )
-endif()
-
-if(ARCH STREQUAL "x86")
+if(${ARCH} STREQUAL "x86")
   set(
     CRYPTO_ARCH_SOURCES
 
@@ -141,7 +128,7 @@ if(ARCH STREQUAL "x86")
   )
 endif()
 
-if(ARCH STREQUAL "x86_64")
+if(${ARCH} STREQUAL "x86_64")
   set(
     CRYPTO_ARCH_SOURCES
 
@@ -150,6 +137,7 @@ if(ARCH STREQUAL "x86_64")
     cipher_extra/chacha20_poly1305_x86_64.${ASM_EXT}
     hrss/asm/poly_rq_mul.S
     test/trampoline-x86_64.${ASM_EXT}
+    third_party/sike/asm/fp-x86_64.${ASM_EXT}
   )
 endif()
 
@@ -159,9 +147,10 @@ perlasm(chacha/chacha-x86.${ASM_EXT} chacha/asm/chacha-x86.pl)
 perlasm(chacha/chacha-x86_64.${ASM_EXT} chacha/asm/chacha-x86_64.pl)
 perlasm(cipher_extra/aes128gcmsiv-x86_64.${ASM_EXT} cipher_extra/asm/aes128gcmsiv-x86_64.pl)
 perlasm(cipher_extra/chacha20_poly1305_x86_64.${ASM_EXT} cipher_extra/asm/chacha20_poly1305_x86_64.pl)
+perlasm(third_party/sike/asm/fp-x86_64.${ASM_EXT} ../third_party/sike/asm/fp-x86_64.pl)
+perlasm(third_party/sike/asm/fp-armv8.${ASM_EXT} ../third_party/sike/asm/fp-armv8.pl)
 perlasm(test/trampoline-armv4.${ASM_EXT} test/asm/trampoline-armv4.pl)
 perlasm(test/trampoline-armv8.${ASM_EXT} test/asm/trampoline-armv8.pl)
-perlasm(test/trampoline-ppc.${ASM_EXT} test/asm/trampoline-ppc.pl)
 perlasm(test/trampoline-x86.${ASM_EXT} test/asm/trampoline-x86.pl)
 perlasm(test/trampoline-x86_64.${ASM_EXT} test/asm/trampoline-x86_64.pl)
 
@@ -190,7 +179,6 @@ add_custom_command(
   err/pkcs8.errordata
   err/rsa.errordata
   err/ssl.errordata
-  err/trust_token.errordata
   err/x509.errordata
   err/x509v3.errordata
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/err
@@ -211,7 +199,6 @@ add_library(
   asn1/a_object.c
   asn1/a_octet.c
   asn1/a_print.c
-  asn1/a_strex.c
   asn1/a_strnid.c
   asn1/a_time.c
   asn1/a_type.c
@@ -241,7 +228,6 @@ add_library(
   bio/printf.c
   bio/socket.c
   bio/socket_helper.c
-  blake2/blake2.c
   bn_extra/bn_asn1.c
   bn_extra/convert.c
   buf/buf.c
@@ -266,24 +252,22 @@ add_library(
   conf/conf.c
   cpu-aarch64-fuchsia.c
   cpu-aarch64-linux.c
-  cpu-aarch64-win.c
   cpu-arm-linux.c
   cpu-arm.c
   cpu-intel.c
   cpu-ppc64le.c
   crypto.c
-  curve25519/curve25519.c
   curve25519/spake25519.c
-  dh_extra/params.c
-  dh_extra/dh_asn1.c
+  dh/dh.c
+  dh/params.c
+  dh/check.c
+  dh/dh_asn1.c
   digest_extra/digest_extra.c
   dsa/dsa.c
   dsa/dsa_asn1.c
   ecdh_extra/ecdh_extra.c
   ecdsa_extra/ecdsa_asn1.c
   ec_extra/ec_asn1.c
-  ec_extra/ec_derive.c
-  ec_extra/hash_to_curve.c
   err/err.c
   err_data.c
   engine/engine.c
@@ -306,7 +290,6 @@ add_library(
   evp/sign.c
   ex_data.c
   hkdf/hkdf.c
-  hpke/hpke.c
   hrss/hrss.c
   lhash/lhash.c
   mem.c
@@ -332,7 +315,6 @@ add_library(
   rand_extra/deterministic.c
   rand_extra/forkunsafe.c
   rand_extra/fuchsia.c
-  rand_extra/passive.c
   rand_extra/rand_extra.c
   rand_extra/windows.c
   rc4/rc4.c
@@ -346,18 +328,15 @@ add_library(
   thread_none.c
   thread_pthread.c
   thread_win.c
-  trust_token/pmbtoken.c
-  trust_token/trust_token.c
-  trust_token/voprf.c
   x509/a_digest.c
   x509/a_sign.c
+  x509/a_strex.c
   x509/a_verify.c
   x509/algorithm.c
   x509/asn1_gen.c
   x509/by_dir.c
   x509/by_file.c
   x509/i2d_pr.c
-  x509/name_print.c
   x509/rsa_pss.c
   x509/t_crl.c
   x509/t_req.c
@@ -371,6 +350,7 @@ add_library(
   x509/x509_ext.c
   x509/x509_lu.c
   x509/x509_obj.c
+  x509/x509_r2x.c
   x509/x509_req.c
   x509/x509_set.c
   x509/x509_trs.c
@@ -423,11 +403,19 @@ add_library(
   x509v3/v3_pci.c
   x509v3/v3_pcia.c
   x509v3/v3_pcons.c
+  x509v3/v3_pku.c
   x509v3/v3_pmaps.c
   x509v3/v3_prn.c
   x509v3/v3_purp.c
   x509v3/v3_skey.c
+  x509v3/v3_sxnet.c
   x509v3/v3_utl.c
+  ../third_party/fiat/curve25519.c
+  ../third_party/sike/fpx.c
+  ../third_party/sike/isogeny.c
+  ../third_party/sike/curve_params.c
+  ../third_party/sike/sike.c
+  ../third_party/sike/asm/fp_generic.c
 
   $<TARGET_OBJECTS:fipsmodule>
 
@@ -436,17 +424,13 @@ add_library(
 )
 
 if(FIPS_SHARED)
-  set(EXTRA_INJECT_HASH_ARGS)
-  if(ANDROID)
-    set(EXTRA_INJECT_HASH_ARGS "-sha256")
-  endif()
   # Rewrite libcrypto.so to inject the correct module hash value. This assumes
   # UNIX-style library naming, but we only support FIPS mode on Linux anyway.
   add_custom_command(
     TARGET crypto POST_BUILD
     COMMAND ${GO_EXECUTABLE} run
     ${CMAKE_CURRENT_SOURCE_DIR}/../util/fipstools/inject_hash/inject_hash.go
-    -o libcrypto.so -in-object libcrypto.so ${EXTRA_INJECT_HASH_ARGS}
+    -o libcrypto.so -in-object libcrypto.so
     # The DEPENDS argument to a POST_BUILD rule appears to be ignored. Thus
     # go_executable isn't used (as it doesn't get built), but we list this
     # dependency anyway in case it starts working in some CMake version.
@@ -463,7 +447,7 @@ endif()
 
 SET_TARGET_PROPERTIES(crypto PROPERTIES LINKER_LANGUAGE C)
 
-if(NOT WIN32 AND NOT ANDROID)
+if(NOT MSVC AND NOT ANDROID)
   target_link_libraries(crypto pthread)
 endif()
 
@@ -473,44 +457,27 @@ if(USE_CUSTOM_LIBCXX)
   target_link_libraries(crypto libcxx)
 endif()
 
-# urandom_test is a separate binary because it needs to be able to observe the
-# PRNG initialisation, which means that it can't have other tests running before
-# it does.
-add_executable(
-  urandom_test
-
-  fipsmodule/rand/urandom_test.cc
-)
-
-target_link_libraries(urandom_test test_support_lib boringssl_gtest crypto)
-
-add_dependencies(urandom_test global_target)
-add_dependencies(all_tests urandom_test)
-
 add_executable(
   crypto_test
 
   abi_self_test.cc
   asn1/asn1_test.cc
   base64/base64_test.cc
-  bio/bio_test.cc
-  blake2/blake2_test.cc
   buf/buf_test.cc
+  bio/bio_test.cc
   bytestring/bytestring_test.cc
   chacha/chacha_test.cc
   cipher_extra/aead_test.cc
   cipher_extra/cipher_test.cc
   cmac/cmac_test.cc
   compiler_test.cc
-  conf/conf_test.cc
   constant_time_test.cc
   cpu-arm-linux_test.cc
-  crypto_test.cc
   curve25519/ed25519_test.cc
   curve25519/spake25519_test.cc
   curve25519/x25519_test.cc
   ecdh_extra/ecdh_test.cc
-  dh_extra/dh_test.cc
+  dh/dh_test.cc
   digest_extra/digest_test.cc
   dsa/dsa_test.cc
   err/err_test.cc
@@ -526,10 +493,8 @@ add_executable(
   fipsmodule/md5/md5_test.cc
   fipsmodule/modes/gcm_test.cc
   fipsmodule/rand/ctrdrbg_test.cc
-  fipsmodule/rand/fork_detect_test.cc
   fipsmodule/sha/sha_test.cc
   hkdf/hkdf_test.cc
-  hpke/hpke_test.cc
   hmac_extra/hmac_test.cc
   hrss/hrss_test.cc
   impl_dispatch_test.cc
@@ -549,11 +514,11 @@ add_executable(
   siphash/siphash_test.cc
   test/file_test_gtest.cc
   thread_test.cc
-  trust_token/trust_token_test.cc
   x509/x509_test.cc
   x509/x509_time_test.cc
   x509v3/tab_test.cc
   x509v3/v3name_test.cc
+  ../third_party/sike/sike_test.cc
 
   $<TARGET_OBJECTS:crypto_test_data>
   $<TARGET_OBJECTS:boringssl_gtest_main>

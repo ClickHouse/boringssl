@@ -79,6 +79,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <openssl/buf.h>
 #include <openssl/err.h>
 #include <openssl/mem.h>
 
@@ -126,7 +127,13 @@ BIO *BIO_new_fp(FILE *stream, int close_flag) {
   return ret;
 }
 
+static int file_new(BIO *bio) { return 1; }
+
 static int file_free(BIO *bio) {
+  if (bio == NULL) {
+    return 0;
+  }
+
   if (!bio->shutdown) {
     return 1;
   }
@@ -201,16 +208,16 @@ static long file_ctrl(BIO *b, int cmd, long num, void *ptr) {
       b->shutdown = (int)num & BIO_CLOSE;
       if (num & BIO_FP_APPEND) {
         if (num & BIO_FP_READ) {
-          OPENSSL_strlcpy(p, "a+", sizeof(p));
+          BUF_strlcpy(p, "a+", sizeof(p));
         } else {
-          OPENSSL_strlcpy(p, "a", sizeof(p));
+          BUF_strlcpy(p, "a", sizeof(p));
         }
       } else if ((num & BIO_FP_READ) && (num & BIO_FP_WRITE)) {
-        OPENSSL_strlcpy(p, "r+", sizeof(p));
+        BUF_strlcpy(p, "r+", sizeof(p));
       } else if (num & BIO_FP_WRITE) {
-        OPENSSL_strlcpy(p, "w", sizeof(p));
+        BUF_strlcpy(p, "w", sizeof(p));
       } else if (num & BIO_FP_READ) {
-        OPENSSL_strlcpy(p, "r", sizeof(p));
+        BUF_strlcpy(p, "r", sizeof(p));
       } else {
         OPENSSL_PUT_ERROR(BIO, BIO_R_BAD_FOPEN_MODE);
         ret = 0;
@@ -273,7 +280,7 @@ static const BIO_METHOD methods_filep = {
     BIO_TYPE_FILE,   "FILE pointer",
     file_write,      file_read,
     NULL /* puts */, file_gets,
-    file_ctrl,       NULL /* create */,
+    file_ctrl,       file_new,
     file_free,       NULL /* callback_ctrl */,
 };
 
