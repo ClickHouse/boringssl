@@ -1,19 +1,3 @@
-// Copyright (c) 2019, Google Inc.
-//
-// Permission to use, copy, modify, and/or distribute this software for any
-// purpose with or without fee is hereby granted, provided that the above
-// copyright notice and this permission notice appear in all copies.
-//
-// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
-// SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
-// OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
-// CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
-
-// +build interactive
-
 package main
 
 import (
@@ -36,8 +20,6 @@ import (
 	"boringssl.googlesource.com/boringssl/util/fipstools/acvp/acvptool/acvp"
 	"golang.org/x/crypto/ssh/terminal"
 )
-
-const interactiveModeSupported = true
 
 func updateTerminalSize(term *terminal.Terminal) {
 	width, height, err := terminal.GetSize(0)
@@ -563,7 +545,7 @@ func runInteractive(server *acvp.Server, config Config) {
 	defer terminal.Restore(0, oldState)
 	term := terminal.NewTerminal(os.Stdin, "> ")
 
-	resizeChan := make(chan os.Signal, 1)
+	resizeChan := make(chan os.Signal)
 	go func() {
 		for _ = range resizeChan {
 			updateTerminalSize(term)
@@ -578,10 +560,12 @@ func runInteractive(server *acvp.Server, config Config) {
 		resultType:   reflect.TypeOf(&acvp.RequestStatus{}),
 		canEnumerate: true,
 	}
+	// https://usnistgov.github.io/ACVP/artifacts/draft-fussell-acvp-spec-00.html#rfc.section.11.8
 	env.variables["vendors"] = ServerObjectSet{
 		env:  env,
 		name: "vendors",
 		searchKeys: map[string][]acvp.Relation{
+			// https://usnistgov.github.io/ACVP/artifacts/draft-fussell-acvp-spec-00.html#rfc.section.11.8.1
 			"name":        []acvp.Relation{acvp.Equals, acvp.StartsWith, acvp.EndsWith, acvp.Contains},
 			"website":     []acvp.Relation{acvp.Equals, acvp.StartsWith, acvp.EndsWith, acvp.Contains},
 			"email":       []acvp.Relation{acvp.Equals, acvp.StartsWith, acvp.EndsWith, acvp.Contains},
@@ -607,10 +591,12 @@ func runInteractive(server *acvp.Server, config Config) {
 		},
 		resultType: reflect.TypeOf(&acvp.Vendor{}),
 	}
+	// https://usnistgov.github.io/ACVP/artifacts/draft-fussell-acvp-spec-00.html#rfc.section.11.9
 	env.variables["persons"] = ServerObjectSet{
 		env:  env,
 		name: "persons",
 		searchKeys: map[string][]acvp.Relation{
+			// https://usnistgov.github.io/ACVP/artifacts/draft-fussell-acvp-spec-00.html#rfc.section.11.10.1
 			"fullName":    []acvp.Relation{acvp.Equals, acvp.StartsWith, acvp.EndsWith, acvp.Contains},
 			"email":       []acvp.Relation{acvp.Equals, acvp.StartsWith, acvp.EndsWith, acvp.Contains},
 			"phoneNumber": []acvp.Relation{acvp.Equals, acvp.StartsWith, acvp.EndsWith, acvp.Contains},
@@ -618,10 +604,12 @@ func runInteractive(server *acvp.Server, config Config) {
 		},
 		resultType: reflect.TypeOf(&acvp.Person{}),
 	}
+	// https://usnistgov.github.io/ACVP/artifacts/draft-fussell-acvp-spec-00.html#rfc.section.11.11
 	env.variables["modules"] = ServerObjectSet{
 		env:  env,
 		name: "modules",
 		searchKeys: map[string][]acvp.Relation{
+			// https://usnistgov.github.io/ACVP/artifacts/draft-fussell-acvp-spec-00.html#rfc.section.11.10.1
 			"name":        []acvp.Relation{acvp.Equals, acvp.StartsWith, acvp.EndsWith, acvp.Contains},
 			"version":     []acvp.Relation{acvp.Equals, acvp.StartsWith, acvp.EndsWith, acvp.Contains},
 			"website":     []acvp.Relation{acvp.Equals, acvp.StartsWith, acvp.EndsWith, acvp.Contains},
@@ -631,24 +619,29 @@ func runInteractive(server *acvp.Server, config Config) {
 		},
 		resultType: reflect.TypeOf(&acvp.Module{}),
 	}
+	// https://usnistgov.github.io/ACVP/artifacts/draft-fussell-acvp-spec-00.html#rfc.section.11.12
 	env.variables["oes"] = ServerObjectSet{
 		env:  env,
 		name: "oes",
 		searchKeys: map[string][]acvp.Relation{
+			// https://usnistgov.github.io/ACVP/artifacts/draft-fussell-acvp-spec-00.html#rfc.section.11.12.1
 			"name": []acvp.Relation{acvp.Equals, acvp.StartsWith, acvp.EndsWith, acvp.Contains},
 		},
 		resultType: reflect.TypeOf(&acvp.OperationalEnvironment{}),
 	}
+	// https://usnistgov.github.io/ACVP/artifacts/draft-fussell-acvp-spec-00.html#rfc.section.11.13
 	env.variables["deps"] = ServerObjectSet{
 		env:  env,
 		name: "dependencies",
 		searchKeys: map[string][]acvp.Relation{
+			// https://usnistgov.github.io/ACVP/artifacts/draft-fussell-acvp-spec-00.html#rfc.section.11.12.1
 			"name":        []acvp.Relation{acvp.Equals, acvp.StartsWith, acvp.EndsWith, acvp.Contains},
 			"type":        []acvp.Relation{acvp.Equals, acvp.StartsWith, acvp.EndsWith, acvp.Contains},
 			"description": []acvp.Relation{acvp.Equals, acvp.StartsWith, acvp.EndsWith, acvp.Contains},
 		},
 		resultType: reflect.TypeOf(&acvp.Dependency{}),
 	}
+	// https://usnistgov.github.io/ACVP/artifacts/draft-fussell-acvp-spec-00.html#rfc.section.11.14
 	env.variables["algos"] = Algorithms{
 		ServerObjectSet{
 			env:          env,
@@ -657,6 +650,7 @@ func runInteractive(server *acvp.Server, config Config) {
 			canEnumerate: true,
 		},
 	}
+	// https://usnistgov.github.io/ACVP/artifacts/draft-fussell-acvp-spec-00.html#rfc.section.11.15
 	env.variables["sessions"] = ServerObjectSet{
 		env:          env,
 		name:         "testSessions",

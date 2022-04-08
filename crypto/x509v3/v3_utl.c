@@ -63,6 +63,7 @@
 #include <string.h>
 
 #include <openssl/bn.h>
+#include <openssl/buf.h>
 #include <openssl/conf.h>
 #include <openssl/err.h>
 #include <openssl/mem.h>
@@ -81,74 +82,47 @@ static STACK_OF(OPENSSL_STRING) *get_email(X509_NAME *name,
 static void str_free(OPENSSL_STRING str);
 static int append_ia5(STACK_OF(OPENSSL_STRING) **sk, ASN1_IA5STRING *email);
 
-static int ipv4_from_asc(unsigned char v4[4], const char *in);
-static int ipv6_from_asc(unsigned char v6[16], const char *in);
+static int ipv4_from_asc(unsigned char *v4, const char *in);
+static int ipv6_from_asc(unsigned char *v6, const char *in);
 static int ipv6_cb(const char *elem, int len, void *usr);
 static int ipv6_hex(unsigned char *out, const char *in, int inlen);
 
 /* Add a CONF_VALUE name value pair to stack */
 
-static int x509V3_add_len_value(const char *name, const char *value,
-                                size_t value_len, int omit_value,
-                                STACK_OF(CONF_VALUE) **extlist)
+int X509V3_add_value(const char *name, const char *value,
+                     STACK_OF(CONF_VALUE) **extlist)
 {
     CONF_VALUE *vtmp = NULL;
     char *tname = NULL, *tvalue = NULL;
-    int extlist_was_null = *extlist == NULL;
-    if (name && !(tname = OPENSSL_strdup(name)))
-        goto malloc_err;
-    if (!omit_value) {
-        /* |CONF_VALUE| cannot represent strings with NULs. */
-        if (OPENSSL_memchr(value, 0, value_len)) {
-            OPENSSL_PUT_ERROR(X509V3, X509V3_R_INVALID_VALUE);
-            goto err;
-        }
-        tvalue = OPENSSL_strndup(value, value_len);
-        if (tvalue == NULL) {
-            goto malloc_err;
-        }
-    }
+    if (name && !(tname = BUF_strdup(name)))
+        goto err;
+    if (value && !(tvalue = BUF_strdup(value)))
+        goto err;
     if (!(vtmp = CONF_VALUE_new()))
-        goto malloc_err;
+        goto err;
     if (!*extlist && !(*extlist = sk_CONF_VALUE_new_null()))
-        goto malloc_err;
+        goto err;
     vtmp->section = NULL;
     vtmp->name = tname;
     vtmp->value = tvalue;
     if (!sk_CONF_VALUE_push(*extlist, vtmp))
-        goto malloc_err;
+        goto err;
     return 1;
- malloc_err:
-    OPENSSL_PUT_ERROR(X509V3, ERR_R_MALLOC_FAILURE);
  err:
-    if (extlist_was_null) {
-        sk_CONF_VALUE_free(*extlist);
-        *extlist = NULL;
-    }
-    OPENSSL_free(vtmp);
-    OPENSSL_free(tname);
-    OPENSSL_free(tvalue);
+    OPENSSL_PUT_ERROR(X509V3, ERR_R_MALLOC_FAILURE);
+    if (vtmp)
+        OPENSSL_free(vtmp);
+    if (tname)
+        OPENSSL_free(tname);
+    if (tvalue)
+        OPENSSL_free(tvalue);
     return 0;
-}
-
-int X509V3_add_value(const char *name, const char *value,
-                     STACK_OF(CONF_VALUE) **extlist)
-{
-    return x509V3_add_len_value(name, value, value != NULL ? strlen(value) : 0,
-                                /*omit_value=*/value == NULL, extlist);
 }
 
 int X509V3_add_value_uchar(const char *name, const unsigned char *value,
                            STACK_OF(CONF_VALUE) **extlist)
 {
     return X509V3_add_value(name, (const char *)value, extlist);
-}
-
-int x509V3_add_value_asn1_string(const char *name, const ASN1_STRING *value,
-                                 STACK_OF(CONF_VALUE) **extlist)
-{
-    return x509V3_add_len_value(name, (const char *)value->data, value->length,
-                                /*omit_value=*/0, extlist);
 }
 
 /* Free function for STACK_OF(CONF_VALUE) */
@@ -174,7 +148,7 @@ int X509V3_add_value_bool(const char *name, int asn1_bool,
     return X509V3_add_value(name, "FALSE", extlist);
 }
 
-int X509V3_add_value_bool_nf(const char *name, int asn1_bool,
+int X509V3_add_value_bool_nf(char *name, int asn1_bool,
                              STACK_OF(CONF_VALUE) **extlist)
 {
     if (asn1_bool)
@@ -211,17 +185,17 @@ static char *bignum_to_string(const BIGNUM *bn)
 
     /* Prepend "0x", but place it after the "-" if negative. */
     if (tmp[0] == '-') {
-        OPENSSL_strlcpy(ret, "-0x", len);
-        OPENSSL_strlcat(ret, tmp + 1, len);
+        BUF_strlcpy(ret, "-0x", len);
+        BUF_strlcat(ret, tmp + 1, len);
     } else {
-        OPENSSL_strlcpy(ret, "0x", len);
-        OPENSSL_strlcat(ret, tmp, len);
+        BUF_strlcpy(ret, "0x", len);
+        BUF_strlcat(ret, tmp, len);
     }
     OPENSSL_free(tmp);
     return ret;
 }
 
-char *i2s_ASN1_ENUMERATED(X509V3_EXT_METHOD *method, const ASN1_ENUMERATED *a)
+char *i2s_ASN1_ENUMERATED(X509V3_EXT_METHOD *method, ASN1_ENUMERATED *a)
 {
     BIGNUM *bntmp = NULL;
     char *strtmp = NULL;
@@ -234,7 +208,7 @@ char *i2s_ASN1_ENUMERATED(X509V3_EXT_METHOD *method, const ASN1_ENUMERATED *a)
     return strtmp;
 }
 
-char *i2s_ASN1_INTEGER(X509V3_EXT_METHOD *method, const ASN1_INTEGER *a)
+char *i2s_ASN1_INTEGER(X509V3_EXT_METHOD *method, ASN1_INTEGER *a)
 {
     BIGNUM *bntmp = NULL;
     char *strtmp = NULL;
@@ -247,7 +221,7 @@ char *i2s_ASN1_INTEGER(X509V3_EXT_METHOD *method, const ASN1_INTEGER *a)
     return strtmp;
 }
 
-ASN1_INTEGER *s2i_ASN1_INTEGER(X509V3_EXT_METHOD *method, const char *value)
+ASN1_INTEGER *s2i_ASN1_INTEGER(X509V3_EXT_METHOD *method, char *value)
 {
     BIGNUM *bn = NULL;
     ASN1_INTEGER *aint;
@@ -295,7 +269,7 @@ ASN1_INTEGER *s2i_ASN1_INTEGER(X509V3_EXT_METHOD *method, const char *value)
     return aint;
 }
 
-int X509V3_add_value_int(const char *name, const ASN1_INTEGER *aint,
+int X509V3_add_value_int(const char *name, ASN1_INTEGER *aint,
                          STACK_OF(CONF_VALUE) **extlist)
 {
     char *strtmp;
@@ -309,7 +283,7 @@ int X509V3_add_value_int(const char *name, const ASN1_INTEGER *aint,
     return ret;
 }
 
-int X509V3_get_value_bool(const CONF_VALUE *value, int *asn1_bool)
+int X509V3_get_value_bool(CONF_VALUE *value, int *asn1_bool)
 {
     char *btmp;
     if (!(btmp = value->value))
@@ -331,7 +305,7 @@ int X509V3_get_value_bool(const CONF_VALUE *value, int *asn1_bool)
     return 0;
 }
 
-int X509V3_get_value_int(const CONF_VALUE *value, ASN1_INTEGER **aint)
+int X509V3_get_value_int(CONF_VALUE *value, ASN1_INTEGER **aint)
 {
     ASN1_INTEGER *itmp;
     if (!(itmp = s2i_ASN1_INTEGER(NULL, value->value))) {
@@ -357,7 +331,7 @@ STACK_OF(CONF_VALUE) *X509V3_parse_list(const char *line)
     char *linebuf;
     int state;
     /* We are going to modify the line so copy it first */
-    linebuf = OPENSSL_strdup(line);
+    linebuf = BUF_strdup(line);
     if (linebuf == NULL) {
         OPENSSL_PUT_ERROR(X509V3, ERR_R_MALLOC_FAILURE);
         goto err;
@@ -658,45 +632,27 @@ static void str_free(OPENSSL_STRING str)
 
 static int append_ia5(STACK_OF(OPENSSL_STRING) **sk, ASN1_IA5STRING *email)
 {
+    char *emtmp;
     /* First some sanity checks */
     if (email->type != V_ASN1_IA5STRING)
         return 1;
-    if (email->data == NULL || email->length == 0)
+    if (!email->data || !email->length)
         return 1;
-    /* |OPENSSL_STRING| cannot represent strings with embedded NULs. Do not
-     * report them as outputs. */
-    if (OPENSSL_memchr(email->data, 0, email->length) != NULL)
-        return 1;
-
-    char *emtmp = NULL;
     if (!*sk)
         *sk = sk_OPENSSL_STRING_new(sk_strcmp);
     if (!*sk)
-        goto err;
-
-    emtmp = OPENSSL_strndup((char *)email->data, email->length);
-    if (emtmp == NULL) {
-        goto err;
-    }
-
+        return 0;
     /* Don't add duplicates */
     sk_OPENSSL_STRING_sort(*sk);
-    if (sk_OPENSSL_STRING_find(*sk, NULL, emtmp)) {
-        OPENSSL_free(emtmp);
+    if (sk_OPENSSL_STRING_find(*sk, NULL, (char *)email->data))
         return 1;
-    }
-    if (!sk_OPENSSL_STRING_push(*sk, emtmp)) {
-        goto err;
+    emtmp = BUF_strdup((char *)email->data);
+    if (!emtmp || !sk_OPENSSL_STRING_push(*sk, emtmp)) {
+        X509_email_free(*sk);
+        *sk = NULL;
+        return 0;
     }
     return 1;
-
-err:
-    /* TODO(davidben): Fix the error-handling in this file. It currently relies
-     * on |append_ia5| leaving |*sk| at NULL on error. */
-    OPENSSL_free(emtmp);
-    X509_email_free(*sk);
-    *sk = NULL;
-    return 0;
 }
 
 void X509_email_free(STACK_OF(OPENSSL_STRING) *sk)
@@ -1022,7 +978,7 @@ static int do_check_string(ASN1_STRING *a, int cmp_type, equal_fn equal,
         else if (a->length == (int)blen && !OPENSSL_memcmp(a->data, b, blen))
             rv = 1;
         if (rv > 0 && peername)
-            *peername = OPENSSL_strndup((char *)a->data, a->length);
+            *peername = BUF_strndup((char *)a->data, a->length);
     } else {
         int astrlen;
         unsigned char *astr;
@@ -1041,7 +997,7 @@ static int do_check_string(ASN1_STRING *a, int cmp_type, equal_fn equal,
             rv = equal(astr, astrlen, (unsigned char *)b, blen, flags);
         }
         if (rv > 0 && peername)
-            *peername = OPENSSL_strndup((char *)astr, astrlen);
+            *peername = BUF_strndup((char *)astr, astrlen);
         OPENSSL_free(astr);
     }
     return rv;
@@ -1157,7 +1113,7 @@ int X509_check_ip_asc(X509 *x, const char *ipasc, unsigned int flags)
 
     if (ipasc == NULL)
         return -2;
-    iplen = (size_t)x509v3_a2i_ipadd(ipout, ipasc);
+    iplen = (size_t)a2i_ipadd(ipout, ipasc);
     if (iplen == 0)
         return -2;
     return do_x509_check(x, (char *)ipout, iplen, flags, GEN_IPADD, NULL);
@@ -1165,7 +1121,7 @@ int X509_check_ip_asc(X509 *x, const char *ipasc, unsigned int flags)
 
 /*
  * Convert IP addresses both IPv4 and IPv6 into an OCTET STRING compatible
- * with RFC 3280.
+ * with RFC3280.
  */
 
 ASN1_OCTET_STRING *a2i_IPADDRESS(const char *ipasc)
@@ -1174,7 +1130,10 @@ ASN1_OCTET_STRING *a2i_IPADDRESS(const char *ipasc)
     ASN1_OCTET_STRING *ret;
     int iplen;
 
-    iplen = x509v3_a2i_ipadd(ipout, ipasc);
+    /* If string contains a ':' assume IPv6 */
+
+    iplen = a2i_ipadd(ipout, ipasc);
+
     if (!iplen)
         return NULL;
 
@@ -1197,18 +1156,18 @@ ASN1_OCTET_STRING *a2i_IPADDRESS_NC(const char *ipasc)
     p = strchr(ipasc, '/');
     if (!p)
         return NULL;
-    iptmp = OPENSSL_strdup(ipasc);
+    iptmp = BUF_strdup(ipasc);
     if (!iptmp)
         return NULL;
     p = iptmp + (p - ipasc);
     *p++ = 0;
 
-    iplen1 = x509v3_a2i_ipadd(ipout, iptmp);
+    iplen1 = a2i_ipadd(ipout, iptmp);
 
     if (!iplen1)
         goto err;
 
-    iplen2 = x509v3_a2i_ipadd(ipout + iplen1, p);
+    iplen2 = a2i_ipadd(ipout + iplen1, p);
 
     OPENSSL_free(iptmp);
     iptmp = NULL;
@@ -1232,7 +1191,7 @@ ASN1_OCTET_STRING *a2i_IPADDRESS_NC(const char *ipasc)
     return NULL;
 }
 
-int x509v3_a2i_ipadd(unsigned char ipout[16], const char *ipasc)
+int a2i_ipadd(unsigned char *ipout, const char *ipasc)
 {
     /* If string contains a ':' assume IPv6 */
 
@@ -1247,7 +1206,7 @@ int x509v3_a2i_ipadd(unsigned char ipout[16], const char *ipasc)
     }
 }
 
-static int ipv4_from_asc(unsigned char v4[4], const char *in)
+static int ipv4_from_asc(unsigned char *v4, const char *in)
 {
     int a0, a1, a2, a3;
     if (sscanf(in, "%d.%d.%d.%d", &a0, &a1, &a2, &a3) != 4)
@@ -1273,7 +1232,7 @@ typedef struct {
     int zero_cnt;
 } IPV6_STAT;
 
-static int ipv6_from_asc(unsigned char v6[16], const char *in)
+static int ipv6_from_asc(unsigned char *v6, const char *in)
 {
     IPV6_STAT v6stat;
     v6stat.total = 0;

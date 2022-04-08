@@ -7,7 +7,6 @@ package runner
 import (
 	"crypto"
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rsa"
 	"crypto/subtle"
@@ -17,8 +16,10 @@ import (
 	"io"
 	"math/big"
 
+	"boringssl.googlesource.com/boringssl/ssl/test/runner/curve25519"
+	"boringssl.googlesource.com/boringssl/ssl/test/runner/ed25519"
 	"boringssl.googlesource.com/boringssl/ssl/test/runner/hrss"
-	"golang.org/x/crypto/curve25519"
+	"boringssl.googlesource.com/boringssl/ssl/test/runner/sike"
 )
 
 type keyType int
@@ -107,11 +108,14 @@ func (ka *rsaKeyAgreement) processClientKeyExchange(config *Config, cert *Certif
 		return nil, errClientKeyExchange
 	}
 
-	ciphertextLen := int(ckx.ciphertext[0])<<8 | int(ckx.ciphertext[1])
-	if ciphertextLen != len(ckx.ciphertext)-2 {
-		return nil, errClientKeyExchange
+	ciphertext := ckx.ciphertext
+	if version != VersionSSL30 {
+		ciphertextLen := int(ckx.ciphertext[0])<<8 | int(ckx.ciphertext[1])
+		if ciphertextLen != len(ckx.ciphertext)-2 {
+			return nil, errClientKeyExchange
+		}
+		ciphertext = ckx.ciphertext[2:]
 	}
-	ciphertext := ckx.ciphertext[2:]
 
 	key := cert.PrivateKey.(*rsa.PrivateKey)
 	if ka.exportKey != nil {
@@ -220,10 +224,14 @@ func (ka *rsaKeyAgreement) generateClientKeyExchange(config *Config, clientHello
 		encrypted[0] = 0
 	}
 	ckx := new(clientKeyExchangeMsg)
-	ckx.ciphertext = make([]byte, len(encrypted)+2)
-	ckx.ciphertext[0] = byte(len(encrypted) >> 8)
-	ckx.ciphertext[1] = byte(len(encrypted))
-	copy(ckx.ciphertext[2:], encrypted)
+	if ka.version != VersionSSL30 {
+		ckx.ciphertext = make([]byte, len(encrypted)+2)
+		ckx.ciphertext[0] = byte(len(encrypted) >> 8)
+		ckx.ciphertext[1] = byte(len(encrypted))
+		copy(ckx.ciphertext[2:], encrypted)
+	} else {
+		ckx.ciphertext = encrypted
+	}
 	return preMasterSecret, ckx, nil
 }
 
@@ -426,6 +434,98 @@ func (e *cecpq2Curve) finish(peerKey []byte) (preMasterSecret []byte, err error)
 	return preMasterSecret, nil
 }
 
+// cecpq2BCurve implements CECPQ2b, which is SIKE combined with X25519.
+type cecpq2BCurve struct {
+	// Both public key and shared secret size
+	x25519PrivateKey [32]byte
+	sikePrivateKey   *sike.PrivateKey
+}
+
+func (e *cecpq2BCurve) offer(rand io.Reader) (publicKey []byte, err error) {
+	if _, err = io.ReadFull(rand, e.x25519PrivateKey[:]); err != nil {
+		return nil, err
+	}
+
+	var x25519Public [32]byte
+	curve25519.ScalarBaseMult(&x25519Public, &e.x25519PrivateKey)
+
+	e.sikePrivateKey = sike.NewPrivateKey(sike.KeyVariant_SIKE)
+	if err = e.sikePrivateKey.Generate(rand); err != nil {
+		return nil, err
+	}
+
+	sikePublic := e.sikePrivateKey.GeneratePublicKey().Export()
+	var ret []byte
+	ret = append(ret, x25519Public[:]...)
+	ret = append(ret, sikePublic...)
+	return ret, nil
+}
+
+func (e *cecpq2BCurve) accept(rand io.Reader, peerKey []byte) (publicKey []byte, preMasterSecret []byte, err error) {
+	if len(peerKey) != 32+sike.Params.PublicKeySize {
+		return nil, nil, errors.New("tls: bad length CECPQ2b offer")
+	}
+
+	if _, err = io.ReadFull(rand, e.x25519PrivateKey[:]); err != nil {
+		return nil, nil, err
+	}
+
+	var x25519Shared, x25519PeerKey, x25519Public [32]byte
+	copy(x25519PeerKey[:], peerKey)
+	curve25519.ScalarBaseMult(&x25519Public, &e.x25519PrivateKey)
+	curve25519.ScalarMult(&x25519Shared, &e.x25519PrivateKey, &x25519PeerKey)
+
+	// Per RFC 7748, reject the all-zero value in constant time.
+	var zeros [32]byte
+	if subtle.ConstantTimeCompare(zeros[:], x25519Shared[:]) == 1 {
+		return nil, nil, errors.New("tls: X25519 value with wrong order")
+	}
+
+	var sikePubKey = sike.NewPublicKey(sike.KeyVariant_SIKE)
+	if err = sikePubKey.Import(peerKey[32:]); err != nil {
+		// should never happen as size was already checked
+		return nil, nil, errors.New("tls: implementation error")
+	}
+	sikeCiphertext, sikeShared, err := sike.Encapsulate(rand, sikePubKey)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	publicKey = append(publicKey, x25519Public[:]...)
+	publicKey = append(publicKey, sikeCiphertext...)
+	preMasterSecret = append(preMasterSecret, x25519Shared[:]...)
+	preMasterSecret = append(preMasterSecret, sikeShared...)
+
+	return publicKey, preMasterSecret, nil
+}
+
+func (e *cecpq2BCurve) finish(peerKey []byte) (preMasterSecret []byte, err error) {
+	if len(peerKey) != 32+(sike.Params.PublicKeySize+sike.Params.MsgLen) {
+		return nil, errors.New("tls: bad length CECPQ2b reply")
+	}
+
+	var x25519Shared, x25519PeerKey [32]byte
+	copy(x25519PeerKey[:], peerKey)
+	curve25519.ScalarMult(&x25519Shared, &e.x25519PrivateKey, &x25519PeerKey)
+
+	// Per RFC 7748, reject the all-zero value in constant time.
+	var zeros [32]byte
+	if subtle.ConstantTimeCompare(zeros[:], x25519Shared[:]) == 1 {
+		return nil, errors.New("tls: X25519 value with wrong order")
+	}
+
+	var sikePubKey = e.sikePrivateKey.GeneratePublicKey()
+	sikeShared, err := sike.Decapsulate(e.sikePrivateKey, sikePubKey, peerKey[32:])
+	if err != nil {
+		return nil, errors.New("tls: invalid SIKE ciphertext")
+	}
+
+	preMasterSecret = append(preMasterSecret, x25519Shared[:]...)
+	preMasterSecret = append(preMasterSecret, sikeShared...)
+
+	return preMasterSecret, nil
+}
+
 func curveForCurveID(id CurveID, config *Config) (ecdhCurve, bool) {
 	switch id {
 	case CurveP224:
@@ -440,6 +540,8 @@ func curveForCurveID(id CurveID, config *Config) (ecdhCurve, bool) {
 		return &x25519ECDHCurve{setHighBit: config.Bugs.SetX25519HighBit}, true
 	case CurveCECPQ2:
 		return &cecpq2Curve{}, true
+	case CurveCECPQ2b:
+		return &cecpq2BCurve{}, true
 	default:
 		return nil, false
 	}
@@ -588,7 +690,7 @@ func (ka *ecdheKeyAgreement) generateServerKeyExchange(config *Config, cert *Cer
 NextCandidate:
 	for _, candidate := range preferredCurves {
 		if isPqGroup(candidate) && version < VersionTLS13 {
-			// CECPQ2 is TLS 1.3-only.
+			// CECPQ2 and CECPQ2b is TLS 1.3-only.
 			continue
 		}
 

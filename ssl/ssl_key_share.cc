@@ -31,6 +31,7 @@
 
 #include "internal.h"
 #include "../crypto/internal.h"
+#include "../third_party/sike/sike.h"
 
 BSSL_NAMESPACE_BEGIN
 
@@ -124,17 +125,29 @@ class ECKeyShare : public SSLKeyShare {
     return true;
   }
 
-  bool SerializePrivateKey(CBB *out) override {
+  bool Serialize(CBB *out) override {
     assert(private_key_);
+    CBB cbb;
     UniquePtr<EC_GROUP> group(EC_GROUP_new_by_curve_name(nid_));
     // Padding is added to avoid leaking the length.
     size_t len = BN_num_bytes(EC_GROUP_get0_order(group.get()));
-    return BN_bn2cbb_padded(out, len, private_key_.get());
+    if (!CBB_add_asn1_uint64(out, group_id_) ||
+        !CBB_add_asn1(out, &cbb, CBS_ASN1_OCTETSTRING) ||
+        !BN_bn2cbb_padded(&cbb, len, private_key_.get()) ||
+        !CBB_flush(out)) {
+      return false;
+    }
+    return true;
   }
 
-  bool DeserializePrivateKey(CBS *in) override {
+  bool Deserialize(CBS *in) override {
     assert(!private_key_);
-    private_key_.reset(BN_bin2bn(CBS_data(in), CBS_len(in), nullptr));
+    CBS private_key;
+    if (!CBS_get_asn1(in, &private_key, CBS_ASN1_OCTETSTRING)) {
+      return false;
+    }
+    private_key_.reset(BN_bin2bn(CBS_data(&private_key),
+                                 CBS_len(&private_key), nullptr));
     return private_key_ != nullptr;
   }
 
@@ -177,13 +190,16 @@ class X25519KeyShare : public SSLKeyShare {
     return true;
   }
 
-  bool SerializePrivateKey(CBB *out) override {
-    return CBB_add_bytes(out, private_key_, sizeof(private_key_));
+  bool Serialize(CBB *out) override {
+    return (CBB_add_asn1_uint64(out, GroupID()) &&
+            CBB_add_asn1_octet_string(out, private_key_, sizeof(private_key_)));
   }
 
-  bool DeserializePrivateKey(CBS *in) override {
-    if (CBS_len(in) != sizeof(private_key_) ||
-        !CBS_copy_bytes(in, private_key_, sizeof(private_key_))) {
+  bool Deserialize(CBS *in) override {
+    CBS key;
+    if (!CBS_get_asn1(in, &key, CBS_ASN1_OCTETSTRING) ||
+        CBS_len(&key) != sizeof(private_key_) ||
+        !CBS_copy_bytes(&key, private_key_, sizeof(private_key_))) {
       return false;
     }
     return true;
@@ -206,10 +222,7 @@ class CECPQ2KeyShare : public SSLKeyShare {
     uint8_t hrss_entropy[HRSS_GENERATE_KEY_BYTES];
     HRSS_public_key hrss_public_key;
     RAND_bytes(hrss_entropy, sizeof(hrss_entropy));
-    if (!HRSS_generate_key(&hrss_public_key, &hrss_private_key_,
-                           hrss_entropy)) {
-      return false;
-    }
+    HRSS_generate_key(&hrss_public_key, &hrss_private_key_, hrss_entropy);
 
     uint8_t hrss_public_key_bytes[HRSS_PUBLIC_KEY_BYTES];
     HRSS_marshal_public_key(hrss_public_key_bytes, &hrss_public_key);
@@ -246,10 +259,9 @@ class CECPQ2KeyShare : public SSLKeyShare {
     uint8_t ciphertext[HRSS_CIPHERTEXT_BYTES];
     uint8_t entropy[HRSS_ENCAP_BYTES];
     RAND_bytes(entropy, sizeof(entropy));
+    HRSS_encap(ciphertext, secret.data() + 32, &peer_public_key, entropy);
 
-    if (!HRSS_encap(ciphertext, secret.data() + 32, &peer_public_key,
-                    entropy) ||
-        !CBB_add_bytes(out_public_key, x25519_public_key,
+    if (!CBB_add_bytes(out_public_key, x25519_public_key,
                        sizeof(x25519_public_key)) ||
         !CBB_add_bytes(out_public_key, ciphertext, sizeof(ciphertext))) {
       return false;
@@ -276,10 +288,8 @@ class CECPQ2KeyShare : public SSLKeyShare {
       return false;
     }
 
-    if (!HRSS_decap(secret.data() + 32, &hrss_private_key_,
-                    peer_key.data() + 32, peer_key.size() - 32)) {
-      return false;
-    }
+    HRSS_decap(secret.data() + 32, &hrss_private_key_, peer_key.data() + 32,
+               peer_key.size() - 32);
 
     *out_secret = std::move(secret);
     return true;
@@ -290,6 +300,87 @@ class CECPQ2KeyShare : public SSLKeyShare {
   HRSS_private_key hrss_private_key_;
 };
 
+class CECPQ2bKeyShare : public SSLKeyShare {
+ public:
+  uint16_t GroupID() const override { return SSL_CURVE_CECPQ2b; }
+
+  bool Offer(CBB *out) override {
+    uint8_t public_x25519[32] = {0};
+    X25519_keypair(public_x25519, private_x25519_);
+    if (!SIKE_keypair(private_sike_, public_sike_)) {
+      return false;
+    }
+
+    return CBB_add_bytes(out, public_x25519, sizeof(public_x25519)) &&
+           CBB_add_bytes(out, public_sike_, sizeof(public_sike_));
+  }
+
+  bool Accept(CBB *out_public_key, Array<uint8_t> *out_secret,
+              uint8_t *out_alert, Span<const uint8_t> peer_key) override {
+    uint8_t public_x25519[32];
+    uint8_t private_x25519[32];
+    uint8_t sike_ciphertext[SIKE_CT_BYTESZ] = {0};
+
+    *out_alert = SSL_AD_INTERNAL_ERROR;
+
+    if (peer_key.size() != sizeof(public_x25519) + SIKE_PUB_BYTESZ) {
+      *out_alert = SSL_AD_DECODE_ERROR;
+      OPENSSL_PUT_ERROR(SSL, SSL_R_BAD_ECPOINT);
+      return false;
+    }
+
+    Array<uint8_t> secret;
+    if (!secret.Init(sizeof(private_x25519_) + SIKE_SS_BYTESZ)) {
+      OPENSSL_PUT_ERROR(SSL, ERR_R_MALLOC_FAILURE);
+      return false;
+    }
+
+    X25519_keypair(public_x25519, private_x25519);
+    if (!X25519(secret.data(), private_x25519, peer_key.data())) {
+      *out_alert = SSL_AD_DECODE_ERROR;
+      OPENSSL_PUT_ERROR(SSL, SSL_R_BAD_ECPOINT);
+      return false;
+    }
+
+    SIKE_encaps(secret.data() + sizeof(private_x25519_), sike_ciphertext,
+                peer_key.data() + sizeof(public_x25519));
+    *out_secret = std::move(secret);
+
+    return CBB_add_bytes(out_public_key, public_x25519,
+                         sizeof(public_x25519)) &&
+           CBB_add_bytes(out_public_key, sike_ciphertext,
+                         sizeof(sike_ciphertext));
+  }
+
+  bool Finish(Array<uint8_t> *out_secret, uint8_t *out_alert,
+              Span<const uint8_t> peer_key) override {
+    *out_alert = SSL_AD_INTERNAL_ERROR;
+
+    Array<uint8_t> secret;
+    if (!secret.Init(sizeof(private_x25519_) + SIKE_SS_BYTESZ)) {
+      OPENSSL_PUT_ERROR(SSL, ERR_R_MALLOC_FAILURE);
+      return false;
+    }
+
+    if (peer_key.size() != 32 + SIKE_CT_BYTESZ ||
+        !X25519(secret.data(), private_x25519_, peer_key.data())) {
+      *out_alert = SSL_AD_DECODE_ERROR;
+      OPENSSL_PUT_ERROR(SSL, SSL_R_BAD_ECPOINT);
+      return false;
+    }
+
+    SIKE_decaps(secret.data() + sizeof(private_x25519_), peer_key.data() + 32,
+                public_sike_, private_sike_);
+    *out_secret = std::move(secret);
+    return true;
+  }
+
+ private:
+  uint8_t private_x25519_[32];
+  uint8_t private_sike_[SIKE_PRV_BYTESZ];
+  uint8_t public_sike_[SIKE_PUB_BYTESZ];
+};
+
 CONSTEXPR_ARRAY NamedGroup kNamedGroups[] = {
     {NID_secp224r1, SSL_CURVE_SECP224R1, "P-224", "secp224r1"},
     {NID_X9_62_prime256v1, SSL_CURVE_SECP256R1, "P-256", "prime256v1"},
@@ -297,6 +388,7 @@ CONSTEXPR_ARRAY NamedGroup kNamedGroups[] = {
     {NID_secp521r1, SSL_CURVE_SECP521R1, "P-521", "secp521r1"},
     {NID_X25519, SSL_CURVE_X25519, "X25519", "x25519"},
     {NID_CECPQ2, SSL_CURVE_CECPQ2, "CECPQ2", "CECPQ2"},
+    {NID_CECPQ2b, SSL_CURVE_CECPQ2b, "CECPQ2b", "CECPQ2b"},
 };
 
 }  // namespace
@@ -323,6 +415,8 @@ UniquePtr<SSLKeyShare> SSLKeyShare::Create(uint16_t group_id) {
       return UniquePtr<SSLKeyShare>(New<X25519KeyShare>());
     case SSL_CURVE_CECPQ2:
       return UniquePtr<SSLKeyShare>(New<CECPQ2KeyShare>());
+    case SSL_CURVE_CECPQ2b:
+      return UniquePtr<SSLKeyShare>(New<CECPQ2bKeyShare>());
     default:
       return nullptr;
   }
@@ -330,28 +424,16 @@ UniquePtr<SSLKeyShare> SSLKeyShare::Create(uint16_t group_id) {
 
 UniquePtr<SSLKeyShare> SSLKeyShare::Create(CBS *in) {
   uint64_t group;
-  CBS private_key;
-  if (!CBS_get_asn1_uint64(in, &group) || group > 0xffff ||
-      !CBS_get_asn1(in, &private_key, CBS_ASN1_OCTETSTRING)) {
+  if (!CBS_get_asn1_uint64(in, &group) || group > 0xffff) {
     return nullptr;
   }
   UniquePtr<SSLKeyShare> key_share = Create(static_cast<uint16_t>(group));
-  if (!key_share || !key_share->DeserializePrivateKey(&private_key)) {
+  if (!key_share || !key_share->Deserialize(in)) {
     return nullptr;
   }
   return key_share;
 }
 
-bool SSLKeyShare::Serialize(CBB *out) {
-  CBB private_key;
-  if (!CBB_add_asn1_uint64(out, GroupID()) ||
-      !CBB_add_asn1(out, &private_key, CBS_ASN1_OCTETSTRING) ||
-      !SerializePrivateKey(&private_key) ||  //
-      !CBB_flush(out)) {
-    return false;
-  }
-  return true;
-}
 
 bool SSLKeyShare::Accept(CBB *out_public_key, Array<uint8_t> *out_secret,
                          uint8_t *out_alert, Span<const uint8_t> peer_key) {
